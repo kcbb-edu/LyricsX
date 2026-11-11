@@ -9,6 +9,7 @@
 //   SearchLyricsViewController               → TrackNameResolver.shared.cachedName(...)
 //   PreferenceTabViewController.viewDidLoad  → ESP32BridgePreferences.install(in:)
 
+import AppKit
 import Combine
 import Foundation
 import LyricsXFoundation
@@ -27,6 +28,17 @@ final class ESP32Bridge: @unchecked Sendable {
         set {
             UserDefaults.standard.set(newValue, forKey: Self.serverEnabledKey)
             newValue ? server.start() : server.stop()
+        }
+    }
+
+    static let screenScaleKey = "LyricsXBridgeScreenScale"
+
+    /// 屏幕字体大小比例（0.7–1.3），在「歌词屏幕」设定页调整
+    var screenScale: Double {
+        get { UserDefaults.standard.object(forKey: Self.screenScaleKey) as? Double ?? 1 }
+        set {
+            UserDefaults.standard.set(min(1.3, max(0.7, newValue)), forKey: Self.screenScaleKey)
+            queue.async { self.sendStyle() }
         }
     }
 
@@ -78,6 +90,13 @@ final class ESP32Bridge: @unchecked Sendable {
             .sink { [weak self] in self?.sendSync() }
             .store(in: &cancelBag)
 
+        // 颜色跟桌面歌词设定一样，改了马上发
+        defaults.publisher(for: [.desktopLyricsColor, .desktopLyricsProgressColor, .desktopLyricsBackgroundColor])
+            .prepend(())
+            .receive(on: queue)
+            .sink { [weak self] in self?.sendStyle() }
+            .store(in: &cancelBag)
+
         // 播放中每秒发一次进度，让屏幕校准时钟
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
@@ -88,6 +107,38 @@ final class ESP32Bridge: @unchecked Sendable {
         syncTimer = timer
 
         queue.async { self.trackChanged() }
+    }
+
+    // MARK: - Style / Wi-Fi
+
+    private func sendStyle() {
+        func hex(_ color: NSColor, over background: NSColor = .black) -> String {
+            // 半透明颜色先叠在背景上（屏幕没有透明度）
+            let c = color.usingColorSpace(.sRGB) ?? color
+            let b = background.usingColorSpace(.sRGB) ?? background
+            let a = c.alphaComponent
+            let rgb = [(c.redComponent, b.redComponent), (c.greenComponent, b.greenComponent), (c.blueComponent, b.blueComponent)]
+                .map { Int(((($0.0 * a) + $0.1 * (1 - a)) * 255).rounded()) }
+            return String(format: "#%02X%02X%02X", rgb[0], rgb[1], rgb[2])
+        }
+        let text: NSColor? = defaults[.desktopLyricsColor]
+        let progress: NSColor? = defaults[.desktopLyricsProgressColor]
+        let background: NSColor? = defaults[.desktopLyricsBackgroundColor]
+        server.send(BridgeMessage.Style(
+            text: hex(text ?? .white),
+            highlight: hex(progress ?? NSColor(red: 0.2, green: 1, blue: 0.87, alpha: 1)),
+            background: hex(background ?? .black),
+            scale: screenScale
+        ))
+    }
+
+    /// 给某块屏幕新增（或改密码）一组 Wi-Fi
+    func addWiFi(ssid: String, password: String, toClient clientID: String) {
+        server.send(BridgeMessage.WiFi(action: .add, ssid: ssid, password: password), toClient: clientID)
+    }
+
+    func removeWiFi(ssid: String, fromClient clientID: String) {
+        server.send(BridgeMessage.WiFi(action: .remove, ssid: ssid), toClient: clientID)
     }
 
     // MARK: - Track

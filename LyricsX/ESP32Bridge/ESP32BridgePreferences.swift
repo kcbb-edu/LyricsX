@@ -10,7 +10,7 @@ enum ESP32BridgePreferences {
     static func install(in tabViewController: NSTabViewController) {
         let controller = NSHostingController(rootView: ESP32BridgePreferencesView(status: ESP32Bridge.shared.status))
         controller.title = "歌词屏幕"
-        controller.view.frame = NSRect(x: 0, y: 0, width: 520, height: 420)
+        controller.view.frame = NSRect(x: 0, y: 0, width: 560, height: 640)
         let item = NSTabViewItem(viewController: controller)
         item.label = "歌词屏幕"
         if #available(macOS 11.0, *) {
@@ -25,6 +25,7 @@ struct ESP32BridgePreferencesView: View {
     @State private var resolverEnabled = TrackNameResolver.shared.isEnabled
     @State private var serverEnabled = ESP32Bridge.shared.isServerEnabled
     @State private var cacheCleared = false
+    @State private var screenScale = ESP32Bridge.shared.screenScale
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -60,6 +61,17 @@ struct ESP32BridgePreferencesView: View {
                         set: { serverEnabled = $0; ESP32Bridge.shared.isServerEnabled = $0 }
                     ))
                     serverStatusRow
+                    HStack {
+                        Text("字体大小")
+                        Slider(value: Binding(
+                            get: { screenScale },
+                            set: { screenScale = $0; ESP32Bridge.shared.screenScale = $0 }
+                        ), in: 0.7...1.3, step: 0.05)
+                        Text("\(Int((screenScale * 100).rounded()))%").frame(width: 44, alignment: .trailing)
+                    }
+                    Text("颜色跟「桌面歌词」的文字、进度、背景颜色一样。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     clientList
                 }
                 .padding(8)
@@ -68,7 +80,7 @@ struct ESP32BridgePreferencesView: View {
             Spacer(minLength: 0)
         }
         .padding(20)
-        .frame(width: 520, height: 420, alignment: .topLeading)
+        .frame(width: 560, height: 640, alignment: .topLeading)
     }
 
     // MARK: - 中文名
@@ -118,17 +130,7 @@ struct ESP32BridgePreferencesView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             ForEach(clients) { client in
-                HStack {
-                    Image(nsImage: NSImage(named: NSImage.networkName) ?? NSImage())
-                        .resizable()
-                        .frame(width: 14, height: 14)
-                    Text(client.device ?? "未知装置")
-                    Text(client.address).foregroundColor(.secondary)
-                    if let width = client.width, let height = client.height, width > 0 {
-                        Text("\(width)×\(height)").foregroundColor(.secondary)
-                    }
-                }
-                .font(.callout)
+                ScreenRow(client: client)
             }
         }
     }
@@ -137,5 +139,51 @@ struct ESP32BridgePreferencesView: View {
         Text(text)
             .font(.callout)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// 一块已连接的屏幕：名称、地址，以及它存的 Wi-Fi（可以删除、新增）
+private struct ScreenRow: View {
+    let client: BridgeServer.Client
+    @State private var newSSID = ""
+    @State private var newPassword = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(nsImage: NSImage(named: NSImage.networkName) ?? NSImage())
+                    .resizable()
+                    .frame(width: 14, height: 14)
+                Text(client.device ?? "未知装置")
+                Text(client.address).foregroundColor(.secondary)
+                if let width = client.width, let height = client.height, width > 0 {
+                    Text("\(width)×\(height)").foregroundColor(.secondary)
+                }
+            }
+            .font(.callout)
+
+            Text("这块屏幕存的 Wi-Fi（开机时连讯号最强的）：").font(.caption).foregroundColor(.secondary)
+            ForEach(client.wifiSaved, id: \.self) { ssid in
+                HStack {
+                    Text(ssid)
+                    if ssid == client.wifiCurrent { Text("（目前）").foregroundColor(.secondary) }
+                    Spacer()
+                    Button("删除") { ESP32Bridge.shared.removeWiFi(ssid: ssid, fromClient: client.id) }
+                }
+                .font(.callout)
+            }
+            HStack {
+                TextField("Wi-Fi 名称（2.4 GHz）", text: $newSSID)
+                SecureField("密码", text: $newPassword)
+                Button("加入") {
+                    ESP32Bridge.shared.addWiFi(ssid: newSSID, password: newPassword, toClient: client.id)
+                    newSSID = ""
+                    newPassword = ""
+                }
+                .disabled(newSSID.isEmpty)
+            }
+            .font(.callout)
+        }
+        .padding(.leading, 4)
     }
 }

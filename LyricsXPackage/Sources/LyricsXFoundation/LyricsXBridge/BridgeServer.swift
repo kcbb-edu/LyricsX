@@ -34,6 +34,9 @@ public final class BridgeServer: @unchecked Sendable {
         public var deviceId: String?
         public var width: Int?
         public var height: Int?
+        /// 屏幕存的 Wi-Fi（只有名称）和目前连着的
+        public var wifiSaved: [String] = []
+        public var wifiCurrent: String?
     }
 
     /// 状态改变时呼叫（在 server queue 上），请在 start() 之前设定
@@ -48,8 +51,8 @@ public final class BridgeServer: @unchecked Sendable {
     private var isRunning = false
     private var retryCount = 0
 
-    /// 每种讯息最近的一则，新装置连上时按这个顺序补发；stopped 跟其他三种互斥
-    private enum Slot: CaseIterable { case stopped, track, lyrics, sync }
+    /// 每种讯息最近的一则，新装置连上时按这个顺序补发；stopped 跟 track / lyrics / sync 互斥
+    private enum Slot: CaseIterable { case style, stopped, track, lyrics, sync }
     private var latest: [Slot: Data] = [:]
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -98,6 +101,7 @@ public final class BridgeServer: @unchecked Sendable {
 
     // MARK: - 发送
 
+    public func send(_ message: BridgeMessage.Style) { broadcast(message, slot: .style) }
     public func send(_ message: BridgeMessage.Stopped) { broadcast(message, slot: .stopped) }
     public func send(_ message: BridgeMessage.Track) { broadcast(message, slot: .track) }
     public func send(_ message: BridgeMessage.Lyrics) { broadcast(message, slot: .lyrics) }
@@ -107,11 +111,25 @@ public final class BridgeServer: @unchecked Sendable {
         queue.async {
             // 内容跟上一则一样就不重发
             guard let data = self.encode(message), self.latest[slot] != data else { return }
-            if slot == .stopped { self.latest.removeAll() } else { self.latest[.stopped] = nil }
+            switch slot {
+            case .stopped: self.latest = self.latest.filter { $0.key == .style }
+            case .track, .lyrics, .sync: self.latest[.stopped] = nil
+            case .style: break
+            }
             self.latest[slot] = data
             for connection in self.connections.values {
                 self.send(data, to: connection)
             }
+        }
+    }
+
+    /// 只发给某一块屏幕（Client.id）
+    public func send(_ message: BridgeMessage.WiFi, toClient clientID: String) {
+        queue.async {
+            guard let data = self.encode(message),
+                  let key = self.clients.first(where: { $0.value.id == clientID })?.key,
+                  let connection = self.connections[key] else { return }
+            self.send(data, to: connection)
         }
     }
 
@@ -305,6 +323,14 @@ public final class BridgeServer: @unchecked Sendable {
                 publishStatus()
             }
             log("装置 \(message.device ?? "?")（\(message.deviceId ?? "?")）\(message.width ?? 0)×\(message.height ?? 0)")
+        case "wifi_list":
+            let key = ObjectIdentifier(connection)
+            if var client = clients[key] {
+                client.wifiSaved = message.saved ?? []
+                client.wifiCurrent = message.current
+                clients[key] = client
+                publishStatus()
+            }
         default:
             break
         }

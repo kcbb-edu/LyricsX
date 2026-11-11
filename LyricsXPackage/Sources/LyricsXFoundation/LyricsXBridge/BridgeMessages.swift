@@ -116,6 +116,37 @@ public enum BridgeMessage {
         }
     }
 
+    public struct Style: Encodable, Sendable {
+        public let type = "style"
+        /// "#RRGGBB"
+        public var text: String
+        public var highlight: String
+        public var background: String
+        public var scale: Double
+
+        public init(text: String, highlight: String, background: String, scale: Double) {
+            self.text = text
+            self.highlight = highlight
+            self.background = background
+            self.scale = BridgeMessage.round(scale)
+        }
+    }
+
+    /// 只发给一块屏幕：新增 / 删除它存的 Wi-Fi
+    public struct WiFi: Encodable, Sendable {
+        public enum Action: String, Encodable, Sendable { case add, remove }
+        public let type = "wifi"
+        public var action: Action
+        public var ssid: String
+        public var password: String?
+
+        public init(action: Action, ssid: String, password: String? = nil) {
+            self.action = action
+            self.ssid = ssid
+            self.password = password
+        }
+    }
+
     public struct Stopped: Encodable, Sendable {
         public let type = "stopped"
         public init() {}
@@ -132,6 +163,9 @@ public enum BridgeMessage {
         var deviceId: String?
         var width: Int?
         var height: Int?
+        // wifi_list
+        var current: String?
+        var saved: [String]?
     }
 
     /// 时间只保留到毫秒，JSON 比较短
