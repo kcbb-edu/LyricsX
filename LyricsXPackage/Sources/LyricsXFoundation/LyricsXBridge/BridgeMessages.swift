@@ -15,6 +15,15 @@ public enum BridgeMessage {
         public var name: String
     }
 
+    /// UDP 发现的回应
+    struct Server: Encodable {
+        let type = "server"
+        let ver = BridgeMessage.protocolVersion
+        var id: String
+        var name: String
+        var port: Int
+    }
+
     public struct Track: Encodable, Sendable {
         public let type = "track"
         public var id: String

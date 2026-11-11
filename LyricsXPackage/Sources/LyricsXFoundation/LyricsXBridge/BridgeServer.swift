@@ -7,6 +7,10 @@ import Network
 public final class BridgeServer: @unchecked Sendable {
     public static let serviceType = "_lyricsx._tcp"
     public static let preferredPort: UInt16 = 8765
+    /// 屏幕用 UDP 广播找 Mac 的端口（固定；回应里带 WebSocket 实际端口）。
+    /// 很多路由器不转发 Wi-Fi 装置发出的多播，所以 ESP32 不靠 mDNS 找 Mac。
+    public static let discoveryPort: UInt16 = 8765
+    static let discoveryRequest = "LYRICSX_DISCOVER 1"
 
     /// 给设定页显示用的状态
     public struct Status: Sendable, Equatable {
@@ -38,6 +42,7 @@ public final class BridgeServer: @unchecked Sendable {
     /// 所有状态只在这个 queue 上读写
     private let queue = DispatchQueue(label: "LyricsXBridge.server")
     private var listener: NWListener?
+    private var discoverySource: DispatchSourceRead?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var clients: [ObjectIdentifier: Client] = [:]
     private var isRunning = false
@@ -73,6 +78,7 @@ public final class BridgeServer: @unchecked Sendable {
             guard !self.isRunning else { return }
             self.isRunning = true
             self.startListener(port: Self.preferredPort)
+            self.startDiscovery()
         }
     }
 
@@ -81,6 +87,8 @@ public final class BridgeServer: @unchecked Sendable {
             self.isRunning = false
             self.listener?.cancel()
             self.listener = nil
+            self.discoverySource?.cancel()
+            self.discoverySource = nil
             self.connections.values.forEach { $0.cancel() }
             self.connections.removeAll()
             self.clients.removeAll()
@@ -180,6 +188,51 @@ public final class BridgeServer: @unchecked Sendable {
         }
         self.listener = listener
         listener.start(queue: queue)
+    }
+
+    // MARK: - UDP 广播发现
+
+    private func startDiscovery() {
+        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard fd >= 0 else { return log("无法建立发现用的 UDP socket") }
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = Self.discoveryPort.bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard bound == 0 else {
+            close(fd)
+            return log("UDP 端口 \(Self.discoveryPort) 被占用，屏幕会找不到这台 Mac")
+        }
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        source.setEventHandler { [weak self] in self?.answerDiscovery(fd) }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        discoverySource = source
+    }
+
+    /// 收到屏幕的「有没有 LyricsX？」就直接回给它（unicast）
+    private func answerDiscovery(_ fd: Int32) {
+        var buffer = [UInt8](repeating: 0, count: 256)
+        var from = sockaddr_storage()
+        var fromLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let count = withUnsafeMutablePointer(to: &from) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { recvfrom(fd, &buffer, buffer.count, 0, $0, &fromLength) }
+        }
+        guard count > 0, String(decoding: buffer[0..<count], as: UTF8.self) == Self.discoveryRequest,
+              let port = listener?.port?.rawValue else { return }
+        let reply = BridgeMessage.Server(id: serverID, name: serverName, port: Int(port))
+        guard let data = encode(reply) else { return }
+        _ = data.withUnsafeBytes { bytes in
+            withUnsafePointer(to: &from) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sendto(fd, bytes.baseAddress, data.count, 0, $0, fromLength) }
+            }
+        }
     }
 
     // MARK: - Connections
