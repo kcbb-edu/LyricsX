@@ -33,6 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenu
         registerUserDefaults()
 
         let controller = AppController.shared
+        ESP32Bridge.shared.start() // LyricsXBridge：局域网歌词 API
 
         karaokeLyricsWC = KaraokeLyricsWindowController()
         karaokeLyricsWC?.showWindow(nil)

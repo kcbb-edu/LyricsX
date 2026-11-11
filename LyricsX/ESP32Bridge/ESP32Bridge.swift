@@ -1,0 +1,266 @@
+// LyricsXBridge — 不属于 LyricsX 原本的代码，见 docs/design.md。
+//
+// 这个文件把 LyricsX 的状态（目前歌曲、歌词、播放进度）转成 docs/protocol.md 的讯息，
+// 交给 BridgeServer 发到局域网上的显示屏。另外提供「先用中文名搜歌词，搜不到再用原名」的搜索流程。
+//
+// 接入点（原文件只改这几处）：
+//   AppDelegate.applicationDidFinishLaunching → ESP32Bridge.shared.start()
+//   AppController.currentTrackChanged        → LyricsXBridgeSearch.lyrics(...)
+//   SearchLyricsViewController               → TrackNameResolver.shared.cachedName(...)
+//   PreferenceTabViewController.viewDidLoad  → ESP32BridgePreferences.install(in:)
+
+import Combine
+import Foundation
+import LyricsXFoundation
+import MusicPlayer
+import OpenCC
+
+// 状态只在 `queue` 上读写，所以标成 @unchecked Sendable
+final class ESP32Bridge: @unchecked Sendable {
+    static let shared = ESP32Bridge()
+
+    static let serverEnabledKey = "LyricsXBridgeServerEnabled"
+
+    /// 局域网服务器开关（默认开启），在「歌词屏幕」设定页里切换
+    var isServerEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: Self.serverEnabledKey) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.serverEnabledKey)
+            newValue ? server.start() : server.stop()
+        }
+    }
+
+    /// 给设定页用（只在主线程更新）
+    let status = ESP32BridgeStatus()
+
+    private let server = BridgeServer()
+    /// 所有状态只在这个 queue 上读写
+    private let queue = DispatchQueue(label: "LyricsXBridge.glue")
+    private var cancelBag = Set<AnyCancellable>()
+    private var syncTimer: DispatchSourceTimer?
+
+    private var trackID: String?
+    /// LyricsX 的行号 → 发出去的行号（停用的行不发）
+    private var lineIndexMap: [Int: Int] = [:]
+    private var resolveTask: Task<Void, Never>?
+    /// 上一次发出的进度，用来省掉没有新资讯的 sync
+    private var lastSync: (playing: Bool, line: Int?, pos: TimeInterval, at: Date)?
+
+    private init() {}
+
+    func start() {
+        guard cancelBag.isEmpty else { return }
+        server.onStatusChange = { [status] newValue in
+            DispatchQueue.main.async { status.server = newValue }
+        }
+        if isServerEnabled { server.start() }
+
+        selectedPlayer.currentTrackWillChange
+            .signal()
+            .receive(on: queue)
+            .sink { [weak self] in self?.trackChanged() }
+            .store(in: &cancelBag)
+        AppController.shared.$currentLyrics
+            .receive(on: queue)
+            .sink { [weak self] lyrics in self?.lyricsChanged(lyrics) }
+            .store(in: &cancelBag)
+        // 用户调歌词偏移 → 时间变了，重发整首歌词
+        AppController.shared.publisher(for: \.lyricsOffset)
+            .dropFirst()
+            .removeDuplicates()
+            .receive(on: queue)
+            .sink { [weak self] _ in self?.lyricsChanged(AppController.shared.currentLyrics) }
+            .store(in: &cancelBag)
+        // 换行、播放 / 暂停、拖动进度 → 马上发 sync（没有新资讯的会被省掉）
+        AppController.shared.$currentLineIndex.signal()
+            .merge(with: selectedPlayer.playbackStateWillChange.signal())
+            .receive(on: queue)
+            .sink { [weak self] in self?.sendSync() }
+            .store(in: &cancelBag)
+
+        // 播放中每秒发一次进度，让屏幕校准时钟
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            if selectedPlayer.playbackState.isPlaying { self?.sendSync(force: true) }
+        }
+        timer.resume()
+        syncTimer = timer
+
+        queue.async { self.trackChanged() }
+    }
+
+    // MARK: - Track
+
+    private func trackChanged() {
+        resolveTask?.cancel()
+        guard let track = selectedPlayer.currentTrack else {
+            trackID = nil
+            lineIndexMap = [:]
+            updateNameStatus(nil)
+            server.send(BridgeMessage.Stopped())
+            return
+        }
+        trackID = track.id
+        lineIndexMap = [:]
+        lastSync = nil
+
+        let title = track.title ?? ""
+        let artist = track.artist ?? ""
+        let duration = track.duration ?? 0
+        let cached = TrackNameResolver.shared.cachedName(title: title, artist: artist, duration: duration)
+        sendTrack(track, resolved: cached)
+        // AppController 会马上把歌词清空，这里不用另外发 lyrics
+        updateNameStatus(.init(originalTitle: title, originalArtist: artist, resolved: cached, isLookingUp: cached == nil))
+
+        // 中文名查到后再发一次 track（通常跟搜歌词共用同一个查询）
+        resolveTask = Task { [weak self] in
+            let resolved = await TrackNameResolver.shared.resolve(title: title, artist: artist, duration: duration)
+            guard !Task.isCancelled else { return }
+            self?.updateNameStatus(.init(originalTitle: title, originalArtist: artist, resolved: resolved, isLookingUp: false))
+            guard let resolved else { return }
+            self?.queue.async {
+                guard let self, self.trackID == track.id else { return }
+                self.sendTrack(track, resolved: resolved)
+            }
+        }
+        sendSync()
+    }
+
+    private func updateNameStatus(_ value: ESP32BridgeStatus.NameStatus?) {
+        DispatchQueue.main.async { [status] in status.name = value }
+    }
+
+    private func sendTrack(_ track: MusicTrack, resolved: ResolvedTrackName?) {
+        let title = track.title ?? ""
+        let artist = track.artist ?? ""
+        server.send(BridgeMessage.Track(
+            id: track.id,
+            title: resolved?.title ?? title,
+            artist: resolved?.artist ?? artist,
+            album: resolved?.album ?? track.album,
+            duration: track.duration ?? 0,
+            originalTitle: title,
+            originalArtist: artist
+        ))
+    }
+
+    // MARK: - Lyrics
+
+    private func lyricsChanged(_ lyrics: Lyrics?) {
+        guard let id = trackID else { return }
+        guard let lyrics else {
+            lineIndexMap = [:]
+            server.send(BridgeMessage.Lyrics(id: id, status: .none, lines: []))
+            return
+        }
+
+        // 简繁转换规则跟桌面歌词（KaraokeLyricsController）一样
+        let converter = ChineseConverter.shared
+        let translationCode = lyrics.metadata.translationLanguages.first
+        let convertText = lyrics.metadata.language?.hasPrefix("zh") == true
+        let convertTranslation = translationCode?.hasPrefix("zh") == true
+        let delay = lyrics.adjustedTimeDelay
+
+        var lines: [BridgeMessage.Line] = []
+        var map: [Int: Int] = [:]
+        for (index, line) in lyrics.lines.enumerated() where line.enabled {
+            var text = line.content
+            if convertText, let converter { text = converter.convert(text) }
+            let length = text.unicodeScalars.count
+
+            var words: [BridgeMessage.Word]?
+            if let tags = line.attachments.timetag?.tags, !tags.isEmpty {
+                words = tags.map {
+                    let scalar = BridgeMessage.scalarIndex(ofUTF16Offset: $0.index, in: line.content)
+                    return BridgeMessage.Word(time: $0.time, index: min(scalar, length))
+                }
+            }
+
+            var translation = line.attachments[.translation(languageCode: translationCode)]
+            if convertTranslation, let converter, let value = translation { translation = converter.convert(value) }
+
+            map[index] = lines.count
+            lines.append(BridgeMessage.Line(t: line.position - delay, text: text, trans: translation, words: words))
+        }
+        lineIndexMap = map
+        server.send(BridgeMessage.Lyrics(id: id, status: lines.isEmpty ? .none : .ok, lines: lines))
+        sendSync()
+    }
+
+    // MARK: - Sync
+
+    /// `force` = 定时同步，一定发；其他情况只在播放状态、行号改变或进度跳动时才发
+    private func sendSync(force: Bool = false) {
+        guard let id = trackID else { return }
+        let state = selectedPlayer.playbackState
+        let line = AppController.shared.currentLineIndex.flatMap { lineIndexMap[$0] }
+        let now = Date()
+        if !force, let last = lastSync, last.playing == state.isPlaying, last.line == line {
+            let expected = last.pos + (last.playing ? now.timeIntervalSince(last.at) : 0)
+            if abs(expected - state.time) < 0.3 { return }
+        }
+        lastSync = (state.isPlaying, line, state.time, now)
+        server.send(BridgeMessage.Sync(id: id, pos: state.time, playing: state.isPlaying, line: line))
+    }
+}
+
+// MARK: - 搜索：先中文名，搜不到再用原名
+
+enum LyricsXBridgeSearch {
+    /// 代替 `provider.lyrics(for: request)`。
+    /// 每换一个搜索条件就先呼叫 `onRequest`，让 AppController 更新 `searchRequest`（它用来比对收到的歌词）。
+    static func lyrics(
+        provider: LyricsProvider,
+        original: LyricsSearchRequest,
+        onRequest: @escaping @MainActor (LyricsSearchRequest) -> Void
+    ) -> AsyncThrowingStream<Lyrics, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { @MainActor in
+                do {
+                    var requests = [original]
+                    if case .info(let title, let artist) = original.searchTerm,
+                       let resolved = await TrackNameResolver.shared.resolve(
+                           title: title, artist: artist, duration: original.duration
+                       ) {
+                        var chinese = original
+                        chinese.searchTerm = .info(title: resolved.title, artist: resolved.artist)
+                        requests.insert(chinese, at: 0)
+                        NSLog("[LyricsXBridge] 用中文名搜索：%@ - %@（原名 %@ - %@）",
+                              resolved.title, resolved.artist, title, artist)
+                    }
+                    for request in requests {
+                        try Task.checkCancellation()
+                        onRequest(request)
+                        var found = false
+                        for try await lyrics in provider.lyrics(for: request) {
+                            found = true
+                            continuation.yield(lyrics)
+                        }
+                        if found { break }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+// MARK: - 设定页用的状态
+
+// 只在主线程读写，所以标成 @unchecked Sendable
+final class ESP32BridgeStatus: ObservableObject, @unchecked Sendable {
+    struct NameStatus: Equatable {
+        var originalTitle: String
+        var originalArtist: String
+        var resolved: ResolvedTrackName?
+        var isLookingUp: Bool
+    }
+
+    /// 目前歌曲的中文名修正结果（没有播放就是 nil）
+    @Published var name: NameStatus?
+    @Published var server = BridgeServer.Status()
+}

@@ -51,8 +51,10 @@ class SearchLyricsViewController: NSViewController, NSTableViewDelegate, NSTable
             tableView.reloadData()
             return
         }
-        let artist = track.artist ?? ""
-        let title = track.title ?? ""
+        // LyricsXBridge：有查过的中文名就预填中文名
+        let resolvedName = TrackNameResolver.shared.cachedName(title: track.title ?? "", artist: track.artist ?? "", duration: track.duration ?? 0)
+        let artist = resolvedName?.artist ?? track.artist ?? ""
+        let title = resolvedName?.title ?? track.title ?? ""
         if (searchArtist, searchTitle) != (artist, title) {
             (searchArtist, searchTitle) = (artist, title)
             searchAction(nil)

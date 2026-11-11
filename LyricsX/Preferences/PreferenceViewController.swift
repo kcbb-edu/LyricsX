@@ -1,6 +1,11 @@
 import Cocoa
 
-class PreferenceTabViewController: NSTabViewController {}
+class PreferenceTabViewController: NSTabViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        ESP32BridgePreferences.install(in: self) // LyricsXBridge：「歌词屏幕」设定页
+    }
+}
 
 class PreferenceViewController: NSViewController {
 //    override func viewWillAppear() {

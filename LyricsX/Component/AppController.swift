@@ -249,7 +249,8 @@ class AppController: NSObject {
                 var firstReceived = false
                 var collectionStart: Date?
 
-                for try await lyrics in lyricsManager.lyrics(for: request) {
+                // LyricsXBridge：先用中文名搜，搜不到再用原名（原本是 lyricsManager.lyrics(for: request)）
+                for try await lyrics in LyricsXBridgeSearch.lyrics(provider: lyricsManager, original: request, onRequest: { self.searchRequest = $0 }) {
                     if !firstReceived {
                         lyricsReceived(lyrics: lyrics)
                         if let current = currentLyrics, current === lyrics {

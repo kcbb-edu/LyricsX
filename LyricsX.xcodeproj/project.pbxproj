@@ -21,6 +21,8 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		1B0E5320A1B2C3D4E5F60001 /* ESP32Bridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0E5320A1B2C3D4E5F60002 /* ESP32Bridge.swift */; };
+		1B0E5320A1B2C3D4E5F60004 /* ESP32BridgePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0E5320A1B2C3D4E5F60005 /* ESP32BridgePreferences.swift */; };
 		0F07BAF52E8A8B2900085912 /* PreferenceSourceViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F07BAF42E8A8B2900085912 /* PreferenceSourceViewController.swift */; };
 		BB03C8891FDF6FC000FBE0DA /* ChineseConverter+Singleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB03C8881FDF6FC000FBE0DA /* ChineseConverter+Singleton.swift */; };
 		BB063B2E1E8A93C900A25C3E /* KaraokeLyricsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB063B2D1E8A93C900A25C3E /* KaraokeLyricsView.swift */; };
@@ -112,6 +114,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		1B0E5320A1B2C3D4E5F60005 /* ESP32BridgePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ESP32BridgePreferences.swift; sourceTree = "<group>"; };
+		1B0E5320A1B2C3D4E5F60002 /* ESP32Bridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ESP32Bridge.swift; sourceTree = "<group>"; };
 		0F07BAF42E8A8B2900085912 /* PreferenceSourceViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferenceSourceViewController.swift; sourceTree = "<group>"; };
 		BB03C8881FDF6FC000FBE0DA /* ChineseConverter+Singleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChineseConverter+Singleton.swift"; sourceTree = "<group>"; };
 		BB063B2D1E8A93C900A25C3E /* KaraokeLyricsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KaraokeLyricsView.swift; sourceTree = "<group>"; };
@@ -214,6 +218,15 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		1B0E5320A1B2C3D4E5F60003 /* ESP32Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				1B0E5320A1B2C3D4E5F60002 /* ESP32Bridge.swift */,
+				1B0E5320A1B2C3D4E5F60005 /* ESP32BridgePreferences.swift */,
+			);
+			path = ESP32Bridge;
+			sourceTree = "<group>";
+		};
 		BB063B2F1E8A93CE00A25C3E /* View */ = {
 			isa = PBXGroup;
 			children = (
@@ -259,6 +272,7 @@
 				BB7EC7B41E4ECFFB00A0AC3F /* Controller */,
 				BB7EC7B61E4ED03900A0AC3F /* Utility */,
 				BB4141BC1E45B26800A51775 /* Supporting Files */,
+				1B0E5320A1B2C3D4E5F60003 /* ESP32Bridge */,
 			);
 			path = LyricsX;
 			sourceTree = "<group>";
@@ -696,6 +710,8 @@
 				BB9BCEBA1E843157001BC54B /* Extension.swift in Sources */,
 				BBE2A79824041E36004A7E93 /* CombineExtension.swift in Sources */,
 				BBC1D35B1E485BA7002538A2 /* AppController.swift in Sources */,
+				1B0E5320A1B2C3D4E5F60001 /* ESP32Bridge.swift in Sources */,
+				1B0E5320A1B2C3D4E5F60004 /* ESP32BridgePreferences.swift in Sources */,
 				BB0B296A1E7FBA2D00B1D6C9 /* PreferenceFilterViewController.swift in Sources */,
 				0F07BAF52E8A8B2900085912 /* PreferenceSourceViewController.swift in Sources */,
 				BB89089E21ED69410078F522 /* Lyrics+Language.swift in Sources */,
