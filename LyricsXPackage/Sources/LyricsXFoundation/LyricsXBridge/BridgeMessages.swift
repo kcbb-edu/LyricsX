@@ -13,6 +13,10 @@ public enum BridgeMessage {
         public var serverVersion: String
         public var id: String
         public var name: String
+        /// 屏幕没有网络时间：用 Mac 的时间、时区和 12 / 24 小时制显示时钟
+        public var time = Date().timeIntervalSince1970
+        public var utcOffset = TimeZone.current.secondsFromGMT()
+        public var clock24 = !(DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? "").contains("a")
     }
 
     /// UDP 发现的回应
@@ -163,6 +167,7 @@ public enum BridgeMessage {
         var deviceId: String?
         var width: Int?
         var height: Int?
+        var version: String?
         // wifi_list
         var current: String?
         var saved: [String]?

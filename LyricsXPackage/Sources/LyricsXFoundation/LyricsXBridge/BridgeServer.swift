@@ -1,8 +1,9 @@
 // LyricsXBridge — 不属于 LyricsX 原本的代码。
-// 局域网 WebSocket 服务器 + Bonjour 宣告（_lyricsx._tcp），格式见 docs/protocol.md。
+// 局域网 WebSocket 服务器 + Bonjour 宣告（_lyricsx._tcp），以及 USB 线连着的屏幕（BridgeUSB.swift）。格式见 docs/protocol.md。
 
 import Foundation
 import Network
+import notify
 
 public final class BridgeServer: @unchecked Sendable {
     public static let serviceType = "_lyricsx._tcp"
@@ -11,6 +12,8 @@ public final class BridgeServer: @unchecked Sendable {
     /// 很多路由器不转发 Wi-Fi 装置发出的多播，所以 ESP32 不靠 mDNS 找 Mac。
     public static let discoveryPort: UInt16 = 8765
     static let discoveryRequest = "LYRICSX_DISCOVER 1"
+    /// 烧录 / 看 log 前发这个通知，USB 屏幕会放开串口一分钟：`notifyutil -p LyricsXBridge.usb.pause`
+    public static let usbPauseNotification = "LyricsXBridge.usb.pause"
 
     /// 给设定页显示用的状态
     public struct Status: Sendable, Equatable {
@@ -34,6 +37,8 @@ public final class BridgeServer: @unchecked Sendable {
         public var deviceId: String?
         public var width: Int?
         public var height: Int?
+        /// 屏幕固件的版本
+        public var version: String?
         /// 屏幕存的 Wi-Fi（只有名称）和目前连着的
         public var wifiSaved: [String] = []
         public var wifiCurrent: String?
@@ -49,6 +54,10 @@ public final class BridgeServer: @unchecked Sendable {
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var clients: [ObjectIdentifier: Client] = [:]
     private var isRunning = false
+    private var usbPorts: [String: BridgeSerialPort] = [:]
+    private var usbTimer: DispatchSourceTimer?
+    private var usbPausedUntil = Date.distantPast
+    private var usbPauseToken: Int32 = -1
     private var retryCount = 0
 
     /// 每种讯息最近的一则，新装置连上时按这个顺序补发；stopped 跟 track / lyrics / sync 互斥
@@ -82,6 +91,7 @@ public final class BridgeServer: @unchecked Sendable {
             self.isRunning = true
             self.startListener(port: Self.preferredPort)
             self.startDiscovery()
+            self.startUSB()
         }
     }
 
@@ -94,6 +104,7 @@ public final class BridgeServer: @unchecked Sendable {
             self.discoverySource = nil
             self.connections.values.forEach { $0.cancel() }
             self.connections.removeAll()
+            self.stopUSB()
             self.clients.removeAll()
             self.publishStatus()
         }
@@ -120,6 +131,9 @@ public final class BridgeServer: @unchecked Sendable {
             for connection in self.connections.values {
                 self.send(data, to: connection)
             }
+            for port in self.usbPorts.values where port.isGreeted {
+                port.send(data)
+            }
         }
     }
 
@@ -127,9 +141,12 @@ public final class BridgeServer: @unchecked Sendable {
     public func send(_ message: BridgeMessage.WiFi, toClient clientID: String) {
         queue.async {
             guard let data = self.encode(message),
-                  let key = self.clients.first(where: { $0.value.id == clientID })?.key,
-                  let connection = self.connections[key] else { return }
-            self.send(data, to: connection)
+                  let key = self.clients.first(where: { $0.value.id == clientID })?.key else { return }
+            if let connection = self.connections[key] {
+                self.send(data, to: connection)
+            } else {
+                self.usbPorts.values.first { ObjectIdentifier($0) == key }?.send(data)
+            }
         }
     }
 
@@ -267,7 +284,7 @@ public final class BridgeServer: @unchecked Sendable {
                 )
                 self.publishStatus()
                 self.log("装置已连接：\(connection.endpoint)")
-                self.sendInitialState(to: connection)
+                self.sendInitialState { self.send($0, to: connection) }
                 self.receive(on: connection)
             case .failed, .cancelled:
                 self.connections[ObjectIdentifier(connection)] = nil
@@ -280,12 +297,16 @@ public final class BridgeServer: @unchecked Sendable {
         connection.start(queue: queue)
     }
 
-    private func sendInitialState(to connection: NWConnection) {
-        let hello = BridgeMessage.Hello(serverVersion: serverVersion, id: serverID, name: serverName)
-        if let data = encode(hello) { send(data, to: connection) }
+    private func sendInitialState(_ send: (Data) -> Void) {
+        sendHello(send)
         for data in Slot.allCases.compactMap({ latest[$0] }) {
-            send(data, to: connection)
+            send(data)
         }
+    }
+
+    private func sendHello(_ send: (Data) -> Void) {
+        let hello = BridgeMessage.Hello(serverVersion: serverVersion, id: serverID, name: serverName)
+        if let data = encode(hello) { send(data) }
     }
 
     private func receive(on connection: NWConnection) {
@@ -302,29 +323,28 @@ public final class BridgeServer: @unchecked Sendable {
                 return
             }
             if let data, let message = try? JSONDecoder().decode(BridgeMessage.Incoming.self, from: data) {
-                self.handle(message, from: connection)
+                self.handle(message, key: ObjectIdentifier(connection)) { self.send($0, to: connection) }
             }
             self.receive(on: connection)
         }
     }
 
-    private func handle(_ message: BridgeMessage.Incoming, from connection: NWConnection) {
+    private func handle(_ message: BridgeMessage.Incoming, key: ObjectIdentifier, reply: (Data) -> Void) {
         switch message.type {
         case "ping":
-            if let data = encode(BridgeMessage.Pong()) { send(data, to: connection) }
+            if let data = encode(BridgeMessage.Pong()) { reply(data) }
         case "hello":
-            let key = ObjectIdentifier(connection)
             if var client = clients[key] {
                 client.device = message.device
                 client.deviceId = message.deviceId
                 client.width = message.width
                 client.height = message.height
+                client.version = message.version
                 clients[key] = client
                 publishStatus()
             }
             log("装置 \(message.device ?? "?")（\(message.deviceId ?? "?")）\(message.width ?? 0)×\(message.height ?? 0)")
         case "wifi_list":
-            let key = ObjectIdentifier(connection)
             if var client = clients[key] {
                 client.wifiSaved = message.saved ?? []
                 client.wifiCurrent = message.current
@@ -334,6 +354,76 @@ public final class BridgeServer: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    // MARK: - USB
+
+    private func startUSB() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: 2)
+        timer.setEventHandler { [weak self] in self?.checkUSB() }
+        timer.resume()
+        usbTimer = timer
+        notify_register_dispatch(Self.usbPauseNotification, &usbPauseToken, queue) { [weak self] _ in
+            guard let self else { return }
+            self.log("USB 屏幕暂停一分钟（烧录 / 看 log）")
+            self.usbPausedUntil = Date().addingTimeInterval(60)
+            self.usbPorts.values.forEach { $0.close() }
+        }
+    }
+
+    private func stopUSB() {
+        usbTimer?.cancel()
+        usbTimer = nil
+        notify_cancel(usbPauseToken)
+        usbPauseToken = -1
+        usbPorts.values.forEach { $0.close() }
+    }
+
+    /// 每 2 秒：打开新接上的屏幕、把太久没回应的移出列表
+    private func checkUSB() {
+        for port in usbPorts.values where port.isGreeted && Date().timeIntervalSince(port.lastReceived) > 6 {
+            port.isGreeted = false
+            if clients.removeValue(forKey: ObjectIdentifier(port)) != nil { publishStatus() }
+            log("USB 屏幕没有回应：\(port.path)")
+        }
+        guard Date() >= usbPausedUntil else { return }
+        for path in BridgeSerialPort.espressifPorts() where usbPorts[path] == nil {
+            guard let port = BridgeSerialPort(path: path, queue: queue) else { continue }
+            usbPorts[path] = port
+            port.onLine = { [weak self, unowned port] data in self?.receive(data, from: port) }
+            port.onClose = { [weak self, unowned port] in
+                guard let self else { return }
+                self.usbPorts[port.path] = nil
+                if self.clients.removeValue(forKey: ObjectIdentifier(port)) != nil { self.publishStatus() }
+                self.log("USB 屏幕已断开：\(port.path)")
+            }
+            sendHello(port.send) // 屏幕收到后马上回 hello，不用等它下一次广播
+        }
+    }
+
+    private func receive(_ data: Data, from port: BridgeSerialPort) {
+        guard let message = try? JSONDecoder().decode(BridgeMessage.Incoming.self, from: data) else { return }
+        port.lastReceived = Date()
+        let key = ObjectIdentifier(port)
+        if message.type == "hello", !port.isHelloPending {
+            // 屏幕刚开机 / 刚连上：补发全部状态。没人读串口时屏幕每 2 秒发的 hello 会积在缓冲里、
+            // 打开时一次涌进来，所以等一下、只回一次
+            port.isHelloPending = true
+            queue.asyncAfter(deadline: .now() + 0.3) { [weak self, weak port] in
+                guard let self, let port, self.usbPorts[port.path] === port else { return }
+                port.isHelloPending = false
+                port.isGreeted = true
+                if self.clients[key] == nil { self.log("USB 屏幕已连接：\(port.path)") }
+                self.clients[key] = Client(id: "usb:\(port.path)", address: "USB")
+                self.publishStatus()
+                self.sendInitialState(port.send)
+                self.handle(message, key: key, reply: port.send) // 记下装置资料
+            }
+            return
+        }
+        guard port.isGreeted else { return }
+        handle(message, key: key, reply: port.send)
     }
 
     private func publishStatus() {
