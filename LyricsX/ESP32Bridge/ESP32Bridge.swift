@@ -32,14 +32,31 @@ final class ESP32Bridge: @unchecked Sendable {
     }
 
     static let screenScaleKey = "LyricsXBridgeScreenScale"
+    static let screenScalesKey = "LyricsXBridgeScreenScales"
+    static let screenScaleRange = 0.7...2.0
 
-    /// 屏幕字体大小比例（0.7–1.3），在「歌词屏幕」设定页调整
+    /// 屏幕字体大小比例（所有屏幕共用），在「歌詞顯示器」设定页调整
     var screenScale: Double {
         get { UserDefaults.standard.object(forKey: Self.screenScaleKey) as? Double ?? 1 }
         set {
-            UserDefaults.standard.set(min(1.3, max(0.7, newValue)), forKey: Self.screenScaleKey)
+            UserDefaults.standard.set(newValue.clamped(to: Self.screenScaleRange), forKey: Self.screenScaleKey)
             queue.async { self.sendStyle() }
         }
+    }
+
+    /// 个别屏幕自订的字体比例（deviceId → 比例）
+    private var screenScales: [String: Double] {
+        UserDefaults.standard.dictionary(forKey: Self.screenScalesKey) as? [String: Double] ?? [:]
+    }
+
+    /// 这块屏幕自订的比例；nil = 跟共用的一样
+    func screenScale(for deviceID: String) -> Double? { screenScales[deviceID] }
+
+    func setScreenScale(_ value: Double?, for deviceID: String) {
+        var scales = screenScales
+        scales[deviceID] = value?.clamped(to: Self.screenScaleRange)
+        UserDefaults.standard.set(scales, forKey: Self.screenScalesKey)
+        queue.async { self.sendStyle() }
     }
 
     /// 给设定页用（只在主线程更新）
@@ -57,6 +74,11 @@ final class ESP32Bridge: @unchecked Sendable {
     private var resolveTask: Task<Void, Never>?
     /// 上一次发出的进度，用来省掉没有新资讯的 sync
     private var lastSync: (playing: Bool, line: Int?, pos: TimeInterval, at: Date)?
+    /// 换歌时 Apple Music 会短暂回报「没有歌」：等一下才告诉屏幕停止，免得闪一下时钟
+    private var pendingStop: DispatchWorkItem?
+    /// 播放器最新的状态、LyricsX 目前的行号（从事件拿到的新值）
+    private var playback = PlaybackState.stopped
+    private var lineIndex: Int?
 
     private init() {}
 
@@ -67,10 +89,11 @@ final class ESP32Bridge: @unchecked Sendable {
         }
         if isServerEnabled { server.start() }
 
+        // 注意：这几个都是 @Published 的「将要改变」，送出时播放器的属性还是旧的值，
+        // 所以一律用送来的新值，不要回头读 selectedPlayer / AppController
         selectedPlayer.currentTrackWillChange
-            .signal()
             .receive(on: queue)
-            .sink { [weak self] in self?.trackChanged() }
+            .sink { [weak self] in self?.trackChanged($0) }
             .store(in: &cancelBag)
         AppController.shared.$currentLyrics
             .receive(on: queue)
@@ -84,10 +107,19 @@ final class ESP32Bridge: @unchecked Sendable {
             .sink { [weak self] _ in self?.lyricsChanged(AppController.shared.currentLyrics) }
             .store(in: &cancelBag)
         // 换行、播放 / 暂停、拖动进度 → 马上发 sync（没有新资讯的会被省掉）
-        AppController.shared.$currentLineIndex.signal()
-            .merge(with: selectedPlayer.playbackStateWillChange.signal())
+        AppController.shared.$currentLineIndex
             .receive(on: queue)
-            .sink { [weak self] in self?.sendSync() }
+            .sink { [weak self] in
+                self?.lineIndex = $0
+                self?.sendSync()
+            }
+            .store(in: &cancelBag)
+        selectedPlayer.playbackStateWillChange
+            .receive(on: queue)
+            .sink { [weak self] in
+                self?.playback = $0
+                self?.sendSync()
+            }
             .store(in: &cancelBag)
 
         // 颜色跟桌面歌词设定一样，改了马上发
@@ -101,12 +133,16 @@ final class ESP32Bridge: @unchecked Sendable {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
         timer.setEventHandler { [weak self] in
-            if selectedPlayer.playbackState.isPlaying { self?.sendSync(force: true) }
+            if self?.playback.isPlaying == true { self?.sendSync(force: true) }
         }
         timer.resume()
         syncTimer = timer
 
-        queue.async { self.trackChanged() }
+        queue.async {
+            self.playback = selectedPlayer.playbackState
+            self.lineIndex = AppController.shared.currentLineIndex
+            self.trackChanged(selectedPlayer.currentTrack)
+        }
     }
 
     // MARK: - Style / Wi-Fi
@@ -128,7 +164,8 @@ final class ESP32Bridge: @unchecked Sendable {
             text: hex(text ?? .white),
             highlight: hex(progress ?? NSColor(red: 0.2, green: 1, blue: 0.87, alpha: 1)),
             background: hex(background ?? .black),
-            scale: screenScale
+            scale: screenScale,
+            scales: screenScales
         ))
     }
 
@@ -143,13 +180,17 @@ final class ESP32Bridge: @unchecked Sendable {
 
     // MARK: - Track
 
-    private func trackChanged() {
+    private func trackChanged(_ track: MusicTrack?) {
         resolveTask?.cancel()
-        guard let track = selectedPlayer.currentTrack else {
+        pendingStop?.cancel()
+        pendingStop = nil
+        guard let track else {
             trackID = nil
             lineIndexMap = [:]
             updateNameStatus(nil)
-            server.send(BridgeMessage.Stopped())
+            let stop = DispatchWorkItem { [weak self] in self?.server.send(BridgeMessage.Stopped()) }
+            pendingStop = stop
+            queue.asyncAfter(deadline: .now() + 2, execute: stop)
             return
         }
         trackID = track.id
@@ -244,8 +285,8 @@ final class ESP32Bridge: @unchecked Sendable {
     /// `force` = 定时同步，一定发；其他情况只在播放状态、行号改变或进度跳动时才发
     private func sendSync(force: Bool = false) {
         guard let id = trackID else { return }
-        let state = selectedPlayer.playbackState
-        let line = AppController.shared.currentLineIndex.flatMap { lineIndexMap[$0] }
+        let state = playback
+        let line = lineIndex.flatMap { lineIndexMap[$0] }
         let now = Date()
         if !force, let last = lastSync, last.playing == state.isPlaying, last.line == line {
             let expected = last.pos + (last.playing ? now.timeIntervalSince(last.at) : 0)

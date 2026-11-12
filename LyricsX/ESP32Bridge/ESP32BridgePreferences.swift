@@ -78,7 +78,7 @@ struct ESP32BridgePreferencesView: View {
             GeneralPage(status: status)
         case let .screen(id):
             if let client = clients.first(where: { $0.id == id }) {
-                ScreenPage(client: client)
+                ScreenPage(client: client).id(client.id) // 换一块屏幕就重新读它的设定
             } else {
                 PageTitle("顯示器")
                 Caption("這塊顯示器已經中斷連線。")
@@ -108,17 +108,11 @@ private struct GeneralPage: View {
                 serverStatusRow
             }
             PrefSection(title: "顯示") {
-                HStack {
-                    Text("字體大小")
-                    Slider(value: Binding(
-                        get: { screenScale },
-                        set: { screenScale = $0; ESP32Bridge.shared.screenScale = $0 }
-                    ), in: 0.7...1.3, step: 0.05)
-                    Text("\(Int((screenScale * 100).rounded()))%")
-                        .monospacedDigit()
-                        .frame(width: 44, alignment: .trailing)
-                }
-                Caption("顏色跟「桌面歌詞」的文字、進度、背景顏色一樣。亮度和旋轉在顯示器上調整。")
+                ScaleSlider(title: "字體大小", value: Binding(
+                    get: { screenScale },
+                    set: { screenScale = $0; ESP32Bridge.shared.screenScale = $0 }
+                ))
+                Caption("所有顯示器共用；個別顯示器可以在左邊選它另外設定。顏色跟「桌面歌詞」的文字、進度、背景顏色一樣。亮度和旋轉在顯示器上調整。")
             }
         }
     }
@@ -205,17 +199,24 @@ private struct ScreenInfo {
     var only24GHz: Bool { client.device == "guition-p4-4.3" }
 }
 
-/// 跟屏幕上的设定页同样分类：連線 / Wi-Fi / 關於（顯示的亮度、旋转在屏幕上调）
+/// 跟屏幕上的设定页同样分类：顯示 / 連線 / Wi-Fi / 關於（亮度、旋转在屏幕上调）
 private struct ScreenPage: View {
     let client: BridgeServer.Client
     @State private var isAdding = false
     @State private var pendingRemoval: String?
+    @State private var customScale: Double?
+
+    init(client: BridgeServer.Client) {
+        self.client = client
+        _customScale = State(initialValue: client.deviceId.flatMap { ESP32Bridge.shared.screenScale(for: $0) })
+    }
 
     private var info: ScreenInfo { ScreenInfo(client) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             PageTitle(info.name)
+            if let deviceID = client.deviceId { displaySection(deviceID) }
             PrefSection(title: "連線") {
                 LabeledRow("連線方式", info.isUSB ? "USB" : "Wi-Fi")
                 if !info.isUSB { LabeledRow("IP 位址", client.address) }
@@ -246,6 +247,26 @@ private struct ScreenPage: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("顯示器會中斷這個 Wi-Fi，改連其他已儲存的網路；都沒有的話要用 USB 線重新設定。")
+        }
+    }
+
+    private func displaySection(_ deviceID: String) -> some View {
+        PrefSection(title: "顯示") {
+            Toggle("自訂這塊顯示器的字體大小", isOn: Binding(
+                get: { customScale != nil },
+                set: { on in
+                    customScale = on ? ESP32Bridge.shared.screenScale : nil
+                    ESP32Bridge.shared.setScreenScale(customScale, for: deviceID)
+                }
+            ))
+            if let scale = customScale {
+                ScaleSlider(title: "字體大小", value: Binding(
+                    get: { scale },
+                    set: { customScale = $0; ESP32Bridge.shared.setScreenScale($0, for: deviceID) }
+                ))
+            } else {
+                Caption("跟「一般」相同：\(Int((ESP32Bridge.shared.screenScale * 100).rounded()))%")
+            }
         }
     }
 
@@ -391,6 +412,24 @@ private struct LabeledRow: View {
             Text(name)
             Spacer()
             Text(value).foregroundColor(.secondary).textSelection(.enabled)
+        }
+    }
+}
+
+/// 字体大小：小 A —— 大 A，右边显示百分比
+private struct ScaleSlider: View {
+    let title: String
+    @Binding var value: Double
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+            Image(systemName: "textformat.size.smaller").foregroundColor(.secondary)
+            Slider(value: $value, in: ESP32Bridge.screenScaleRange, step: 0.05)
+            Image(systemName: "textformat.size.larger").foregroundColor(.secondary)
+            Text("\(Int((value * 100).rounded()))%")
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
         }
     }
 }

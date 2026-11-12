@@ -127,12 +127,15 @@ public enum BridgeMessage {
         public var highlight: String
         public var background: String
         public var scale: Double
+        /// 个别屏幕的字体比例（deviceId → 比例），没有的用 scale
+        public var scales: [String: Double]?
 
-        public init(text: String, highlight: String, background: String, scale: Double) {
+        public init(text: String, highlight: String, background: String, scale: Double, scales: [String: Double] = [:]) {
             self.text = text
             self.highlight = highlight
             self.background = background
             self.scale = BridgeMessage.round(scale)
+            self.scales = scales.isEmpty ? nil : scales.mapValues(BridgeMessage.round)
         }
     }
 

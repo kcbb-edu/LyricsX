@@ -97,7 +97,7 @@ final class BridgeSerialPort: @unchecked Sendable {
         while let newline = lineBuffer.firstIndex(of: 0x0A) {
             let line = lineBuffer[lineBuffer.startIndex..<newline]
             lineBuffer.removeSubrange(lineBuffer.startIndex...newline)
-            if line.first == UInt8(ascii: "{") { onLine?(Data(line)) }
+            if line.first == UInt8(ascii: "{") { onLine?(Data(line)) } else { bridgeTrace("ESP " + String(decoding: line, as: UTF8.self)) } // 屏幕的 log
         }
         if lineBuffer.count > 64 * 1024 { lineBuffer.removeAll() } // log 乱码，不会是讯息
     }

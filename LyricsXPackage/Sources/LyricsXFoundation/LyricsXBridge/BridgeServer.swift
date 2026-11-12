@@ -122,6 +122,7 @@ public final class BridgeServer: @unchecked Sendable {
         queue.async {
             // 内容跟上一则一样就不重发
             guard let data = self.encode(message), self.latest[slot] != data else { return }
+            bridgeTrace("SEND " + String(decoding: data.prefix(200), as: UTF8.self))
             switch slot {
             case .stopped: self.latest = self.latest.filter { $0.key == .style }
             case .track, .lyrics, .sync: self.latest[.stopped] = nil
@@ -445,6 +446,15 @@ public final class BridgeServer: @unchecked Sendable {
     }
 
     private func log(_ text: String) {
+        bridgeTrace(text)
         NSLog("[LyricsXBridge] %@", text)
     }
+}
+
+/// 调试：用环境变量 LYRICSX_BRIDGE_TRACE=1 启动时，把发出的讯息和屏幕的 log 印到 stderr（docs/design.md §4）
+private let traceEnabled = ProcessInfo.processInfo.environment["LYRICSX_BRIDGE_TRACE"] != nil
+public func bridgeTrace(_ text: @autoclosure () -> String) {
+    guard traceEnabled else { return }
+    let time = String(format: "%.3f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000))
+    FileHandle.standardError.write(Data("\(time) \(text())\n".utf8))
 }
