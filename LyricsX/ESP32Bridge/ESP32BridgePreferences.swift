@@ -298,11 +298,9 @@ private struct ScreenPage: View {
                     Image(systemName: "wifi").foregroundColor(.secondary)
                     Text(ssid)
                     if ssid == client.wifiCurrent {
-                        Text("已連線")
-                            .font(.caption)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.green.opacity(0.2)))
+                        Badge(text: "已連線", color: .green)
+                    } else if ssid == client.wifiTestSSID, let badge = testBadge(client.wifiTestResult) {
+                        Badge(text: badge.text, color: badge.color)
                     }
                     Spacer()
                     Button {
@@ -320,12 +318,40 @@ private struct ScreenPage: View {
                 }
                 Divider()
             }
+            if client.wifiTestResult == "wrong_password" {
+                Caption("密碼錯誤：再「加入 Wi-Fi…」一次同一個名稱就可以改密碼。")
+            }
             HStack {
                 Button("加入 Wi-Fi…") { isAdding = true }
                     .disabled(client.wifiSaved.count >= 5)
                 Caption(info.only24GHz ? "最多 5 組，只支援 2.4 GHz；開機時連訊號最強的。" : "最多 5 組；開機時連訊號最強的。")
             }
         }
+    }
+}
+
+/// 刚加入的 Wi-Fi 试连结果（屏幕还没连上任何 Wi-Fi 时，加入后会马上试连）
+private func testBadge(_ result: String?) -> (text: String, color: Color)? {
+    switch result {
+    case "testing": return ("正在試連…", .secondary)
+    case "wrong_password": return ("密碼錯誤", .red)
+    case "not_found": return ("附近找不到", .orange)
+    case "failed": return ("連不上", .red)
+    default: return nil
+    }
+}
+
+/// 名称旁边的小标签
+private struct Badge: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.2)))
     }
 }
 

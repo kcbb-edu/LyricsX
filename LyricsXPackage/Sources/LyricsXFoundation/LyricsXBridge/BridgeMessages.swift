@@ -197,6 +197,13 @@ public enum BridgeMessage {
         // wifi_list
         var current: String?
         var saved: [String]?
+        var test: WiFiTest?
+    }
+
+    /// 刚加入的 Wi-Fi 的试连结果（wifi_list 的 test）
+    struct WiFiTest: Decodable {
+        var ssid: String
+        var result: String // testing / ok / wrong_password / not_found / failed
     }
 
     /// 时间只保留到毫秒，JSON 比较短

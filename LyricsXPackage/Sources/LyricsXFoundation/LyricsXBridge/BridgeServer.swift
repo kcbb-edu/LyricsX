@@ -42,6 +42,9 @@ public final class BridgeServer: @unchecked Sendable {
         /// 屏幕存的 Wi-Fi（只有名称）和目前连着的
         public var wifiSaved: [String] = []
         public var wifiCurrent: String?
+        /// 刚加入的 Wi-Fi 试连结果（还没连上任何 Wi-Fi 时屏幕会马上试）：result 是 testing / ok / wrong_password / not_found / failed
+        public var wifiTestSSID: String?
+        public var wifiTestResult: String?
     }
 
     /// 状态改变时呼叫（在 server queue 上），请在 start() 之前设定
@@ -389,6 +392,8 @@ public final class BridgeServer: @unchecked Sendable {
             if var client = clients[key] {
                 client.wifiSaved = message.saved ?? []
                 client.wifiCurrent = message.current
+                client.wifiTestSSID = message.test?.ssid
+                client.wifiTestResult = message.test?.result
                 clients[key] = client
                 publishStatus()
             }
