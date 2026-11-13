@@ -31,72 +31,6 @@ final class ESP32Bridge: @unchecked Sendable {
         }
     }
 
-    static let screenScaleKey = "LyricsXBridgeScreenScale"
-    static let screenScalesKey = "LyricsXBridgeScreenScales"
-    static let screenScaleRange = 0.7...2.0
-
-    /// 屏幕字体大小比例（所有屏幕共用），在「歌詞顯示器」设定页调整
-    var screenScale: Double {
-        get { UserDefaults.standard.object(forKey: Self.screenScaleKey) as? Double ?? 1 }
-        set {
-            UserDefaults.standard.set(newValue.clamped(to: Self.screenScaleRange), forKey: Self.screenScaleKey)
-            queue.async { self.sendStyle() }
-        }
-    }
-
-    static let backgroundModeKey = "LyricsXBridgeBackgroundMode"
-    static let backgroundDimKey = "LyricsXBridgeBackgroundDim" // 以前的三档（0 淡 / 1 标准 / 2 深）
-    static let backgroundDarknessKey = "LyricsXBridgeBackgroundDarkness"
-
-    enum BackgroundMode: String, CaseIterable {
-        /// 模糊封面（文字白色）
-        case artwork
-        /// 纯色（颜色跟桌面歌词一样；Mac 不用做模糊背景）
-        case solid
-    }
-
-    var backgroundMode: BackgroundMode {
-        get { BackgroundMode(rawValue: UserDefaults.standard.string(forKey: Self.backgroundModeKey) ?? "") ?? .artwork }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: Self.backgroundModeKey)
-            queue.async { self.backgroundChanged() }
-        }
-    }
-
-    /// 模糊封面的暗度 0（淡）– 1（深）
-    var backgroundDim: Double {
-        get {
-            if let value = UserDefaults.standard.object(forKey: Self.backgroundDarknessKey) as? Double { return value }
-            let old = UserDefaults.standard.object(forKey: Self.backgroundDimKey) as? Int ?? 1
-            return [0.2, 0.5, 0.65][min(max(old, 0), 2)]
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: Self.backgroundDarknessKey)
-            queue.async { self.backgroundChanged() }
-        }
-    }
-
-    /// 背景设定改了：样式重发（屏幕按模式换颜色），封面重做
-    private func backgroundChanged() {
-        sendStyle()
-        if artwork != nil, let id = trackID { server.setArt(trackID: id) }
-    }
-
-    /// 个别屏幕自订的字体比例（deviceId → 比例）
-    private var screenScales: [String: Double] {
-        UserDefaults.standard.dictionary(forKey: Self.screenScalesKey) as? [String: Double] ?? [:]
-    }
-
-    /// 这块屏幕自订的比例；nil = 跟共用的一样
-    func screenScale(for deviceID: String) -> Double? { screenScales[deviceID] }
-
-    func setScreenScale(_ value: Double?, for deviceID: String) {
-        var scales = screenScales
-        scales[deviceID] = value?.clamped(to: Self.screenScaleRange)
-        UserDefaults.standard.set(scales, forKey: Self.screenScalesKey)
-        queue.async { self.sendStyle() }
-    }
-
     /// 给设定页用（只在主线程更新）
     let status = ESP32BridgeStatus()
 
@@ -128,8 +62,8 @@ final class ESP32Bridge: @unchecked Sendable {
         server.onStatusChange = { [status] newValue in
             DispatchQueue.main.async { status.server = newValue }
         }
-        server.onNeedArt = { [weak self] width, height in
-            self?.queue.async { self?.renderArt(width: width, height: height) }
+        server.onNeedArt = { [weak self] variant in
+            self?.queue.async { self?.renderArt(variant) }
         }
         if isServerEnabled { server.start() }
 
@@ -207,11 +141,7 @@ final class ESP32Bridge: @unchecked Sendable {
         server.send(BridgeMessage.Style(
             text: hex(text ?? .white),
             highlight: hex(progress ?? NSColor(red: 0.2, green: 1, blue: 0.87, alpha: 1)),
-            background: hex(background ?? .black),
-            scale: screenScale,
-            scales: screenScales,
-            backgroundMode: backgroundMode.rawValue,
-            backgroundDim: Int((backgroundDim * 100).rounded())
+            background: hex(background ?? .black)
         ))
     }
 
@@ -295,14 +225,14 @@ final class ESP32Bridge: @unchecked Sendable {
         }
     }
 
-    /// 做某个屏幕大小的封面和背景（在背景执行绪做，做好直接交给 server）
-    private func renderArt(width: Int, height: Int) {
+    /// 做某一种封面图：屏幕大小 + 这块屏幕设的背景暗度（纯色背景只做封面）。在背景执行绪做，做好直接交给 server
+    private func renderArt(_ variant: BridgeServer.ArtVariant) {
         guard let image = artwork, let id = trackID else { return }
-        let dim = backgroundDim, withBackground = backgroundMode == .artwork
         DispatchQueue.global(qos: .utility).async { [server] in
-            guard let art = BridgeArtwork.render(image, width: width, height: height, dim: dim,
-                                                 withBackground: withBackground) else { return }
-            server.send(BridgeMessage.Art(id: id, cover: art.cover, background: art.background), width: width, height: height)
+            guard let art = BridgeArtwork.render(image, width: variant.width, height: variant.height,
+                                                 dim: Double(variant.dim ?? 0) / 100,
+                                                 withBackground: variant.dim != nil) else { return }
+            server.send(BridgeMessage.Art(id: id, cover: art.cover, background: art.background), variant: variant)
         }
     }
 

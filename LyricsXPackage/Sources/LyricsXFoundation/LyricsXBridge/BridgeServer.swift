@@ -47,6 +47,13 @@ public final class BridgeServer: @unchecked Sendable {
         public var wifiTestResult: String?
         /// 屏幕的本机设定（protocol.md `settings`）；旧固件没有就是空的
         public var prefs: [String: Int] = [:]
+
+        /// 这块屏幕要哪一种封面图（大小、背景暗度）；还不知道大小或设定时是 nil
+        public var artVariant: ArtVariant? {
+            guard let width, let height, width > 0, !prefs.isEmpty else { return nil }
+            let solid = (prefs["bg_mode"] ?? 0) != 0
+            return ArtVariant(width: width, height: height, dim: solid ? nil : prefs["bg_dim"] ?? 50)
+        }
     }
 
     /// 状态改变时呼叫（在 server queue 上），请在 start() 之前设定
@@ -160,33 +167,49 @@ public final class BridgeServer: @unchecked Sendable {
         }
     }
 
-    // MARK: - 封面（每种屏幕大小一份）
+    // MARK: - 封面（每种屏幕大小 + 背景暗度一份）
 
-    /// 需要某个大小的封面时呼叫（在 server queue 上）：做好后用 send(_:width:height:) 发
-    public var onNeedArt: (@Sendable (_ width: Int, _ height: Int) -> Void)?
-    /// 有封面的歌（nil = 没有封面）、已经做好的封面（"宽x高" → 讯息）
+    /// 一种封面图：屏幕大小 + 模糊背景的暗度（0–100；nil = 纯色背景，只要封面不做背景）
+    public struct ArtVariant: Hashable, Sendable {
+        public var width: Int
+        public var height: Int
+        public var dim: Int?
+    }
+
+    /// 需要某一种封面图时呼叫（在 server queue 上）：做好后用 send(_:variant:) 发
+    public var onNeedArt: (@Sendable (ArtVariant) -> Void)?
+    /// 有封面的歌（nil = 没有封面）、已经做好的、正在做的
     private var artTrackID: String?
-    private var latestArt: [String: Data] = [:]
+    private var latestArt: [ArtVariant: Data] = [:]
+    private var pendingArt = Set<ArtVariant>()
 
-    /// 换歌：这首歌有没有封面。有的话，向每种已连接的屏幕大小要一份
+    /// 换歌：这首歌有没有封面。有的话，每块屏幕要它那一种
     public func setArt(trackID: String?) {
         queue.async {
             self.artTrackID = trackID
             self.latestArt = [:]
-            guard trackID != nil else { return }
-            var sizes = Set<[Int]>()
-            for client in self.clients.values {
-                if let w = client.width, let h = client.height, sizes.insert([w, h]).inserted { self.onNeedArt?(w, h) }
-            }
+            self.pendingArt = []
+            for key in self.clients.keys { self.requestArt(for: key) }
         }
     }
 
-    public func send(_ message: BridgeMessage.Art, width: Int, height: Int) {
+    /// 给这块屏幕它那一种封面图：做好了就直接发，还没有就请人做（同一种只做一次）
+    private func requestArt(for key: ObjectIdentifier) {
+        guard artTrackID != nil, let variant = clients[key]?.artVariant else { return }
+        if let data = latestArt[variant] {
+            send(data, toKey: key)
+        } else if pendingArt.insert(variant).inserted {
+            onNeedArt?(variant)
+        }
+    }
+
+    public func send(_ message: BridgeMessage.Art, variant: ArtVariant) {
         queue.async {
             guard message.id == self.artTrackID, let data = self.encode(message) else { return }
-            bridgeTrace("SEND art \(width)x\(height) \(data.count / 1024) KB")
-            self.latestArt["\(width)x\(height)"] = data
-            for (key, client) in self.clients where client.width == width && client.height == height {
+            bridgeTrace("SEND art \(variant.width)x\(variant.height) 暗度 \(variant.dim.map(String.init) ?? "纯色") \(data.count / 1024) KB")
+            self.latestArt[variant] = data
+            self.pendingArt.remove(variant)
+            for (key, client) in self.clients where client.artVariant == variant {
                 self.send(data, toKey: key)
             }
         }
@@ -387,15 +410,14 @@ public final class BridgeServer: @unchecked Sendable {
                 publishStatus()
             }
             log("装置 \(message.device ?? "?")（\(message.deviceId ?? "?")）\(message.width ?? 0)×\(message.height ?? 0)")
-            // 知道屏幕大小了：补发封面，没有这个大小的就去做
-            if artTrackID != nil, let w = message.width, let h = message.height {
-                if let art = latestArt["\(w)x\(h)"] { reply(art) } else { onNeedArt?(w, h) }
-            }
+            requestArt(for: key) // 知道大小了（设定还没到的话，等 settings 到了再给）
         case "settings":
             if var client = clients[key], let values = message.values {
+                let before = client.artVariant
                 client.prefs = values
                 clients[key] = client
                 publishStatus()
+                if client.artVariant != before { requestArt(for: key) } // 第一次知道 / 换了背景暗度、模式
             }
         case "wifi_list":
             if var client = clients[key] {

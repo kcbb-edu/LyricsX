@@ -94,9 +94,6 @@ struct ESP32BridgePreferencesView: View {
 private struct GeneralPage: View {
     @ObservedObject var status: ESP32BridgeStatus
     @State private var serverEnabled = ESP32Bridge.shared.isServerEnabled
-    @State private var screenScale = ESP32Bridge.shared.screenScale
-    @State private var backgroundMode = ESP32Bridge.shared.backgroundMode
-    @State private var backgroundDim = ESP32Bridge.shared.backgroundDim
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -109,28 +106,8 @@ private struct GeneralPage: View {
                 Caption("同一個區域網路裡的顯示器會自動找到這台 Mac；用 USB 線接著 Mac 的顯示器不需要 Wi-Fi。")
                 serverStatusRow
             }
-            PrefSection(title: "顯示") {
-                Picker("背景", selection: Binding(
-                    get: { backgroundMode },
-                    set: { backgroundMode = $0; ESP32Bridge.shared.backgroundMode = $0 }
-                )) {
-                    Text("封面模糊").tag(ESP32Bridge.BackgroundMode.artwork)
-                    Text("純色").tag(ESP32Bridge.BackgroundMode.solid)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                if backgroundMode == .artwork {
-                    DimSlider(value: $backgroundDim) { ESP32Bridge.shared.backgroundDim = backgroundDim }
-                    Caption("用正在播放的歌的封面做模糊背景，文字是白色。背景會按封面亮度自動加暗，歌詞位置最亮的地方也看得清楚；看不清楚可以拉深一點。")
-                } else {
-                    Caption("背景和文字顏色跟 LyricsX「桌面歌詞」的設定一樣：文字、進度（卡拉OK 已唱）、背景顏色。Mac 不用製作模糊背景，只傳封面小圖。")
-                }
-                Divider()
-                ScaleSlider(title: "字體大小", value: Binding(
-                    get: { screenScale },
-                    set: { screenScale = $0; ESP32Bridge.shared.screenScale = $0 }
-                ))
-                Caption("所有顯示器共用；個別顯示器可以在左邊選它另外設定。亮度、播放畫面、待機時鐘等也在左邊選顯示器調整。")
+            PrefSection(title: "顯示器設定") {
+                Caption("亮度、字體大小、背景、播放畫面、待機時鐘等都是每塊顯示器各自的設定：在左邊選顯示器調整。")
             }
         }
     }
@@ -223,20 +200,20 @@ private struct ScreenPage: View {
     let client: BridgeServer.Client
     @State private var isAdding = false
     @State private var pendingRemoval: String?
-    @State private var customScale: Double?
-
-    init(client: BridgeServer.Client) {
-        self.client = client
-        _customScale = State(initialValue: client.deviceId.flatMap { ESP32Bridge.shared.screenScale(for: $0) })
-    }
 
     private var info: ScreenInfo { ScreenInfo(client) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             PageTitle(info.name)
-            if let deviceID = client.deviceId { displaySection(deviceID) }
-            if !client.prefs.isEmpty { pauseSection }
+            if client.prefs.isEmpty {
+                PrefSection(title: "顯示") { Caption("更新這塊顯示器的韌體後，可以在這裡調整它的設定。") }
+            } else {
+                displaySection
+                playingSection
+                backgroundSection
+                pauseSection
+            }
             PrefSection(title: "連線") {
                 LabeledRow("連線方式", info.isUSB ? "USB" : "Wi-Fi")
                 if !info.isUSB { LabeledRow("IP 位址", client.address) }
@@ -270,49 +247,45 @@ private struct ScreenPage: View {
         }
     }
 
-    private func displaySection(_ deviceID: String) -> some View {
+    private var displaySection: some View {
         PrefSection(title: "顯示") {
-            Toggle("自訂這塊顯示器的字體大小", isOn: Binding(
-                get: { customScale != nil },
-                set: { on in
-                    customScale = on ? ESP32Bridge.shared.screenScale : nil
-                    ESP32Bridge.shared.setScreenScale(customScale, for: deviceID)
-                }
-            ))
-            if let scale = customScale {
-                ScaleSlider(title: "字體大小", value: Binding(
-                    get: { scale },
-                    set: { customScale = $0; ESP32Bridge.shared.setScreenScale($0, for: deviceID) }
-                ))
-            } else {
-                Caption("跟「一般」相同：\(Int((ESP32Bridge.shared.screenScale * 100).rounded()))%")
-            }
+            PrefSlider(title: "亮度", value: client.prefs["brightness"] ?? 100, range: 10...100,
+                       icons: ("sun.min", "sun.max")) { set("brightness", $0) }
+            Toggle("翻轉畫面（USB 線換邊時用）", isOn: toggle("flipped"))
+            Caption("這些設定存在顯示器上，在顯示器的設定頁也可以改，兩邊會同步。")
+        }
+    }
+
+    private var playingSection: some View {
+        PrefSection(title: "播放中") {
+            LayoutPicker(selection: client.prefs["now_style"] ?? 0,
+                         aspect: CGFloat(client.width ?? 16) / CGFloat(max(client.height ?? 9, 1))) { set("now_style", $0) }
             Divider()
-            if client.prefs.isEmpty {
-                Caption("更新這塊顯示器的韌體後，可以在這裡調整亮度、播放畫面等設定。")
+            PrefSlider(title: "字體大小", value: client.prefs["font_scale"] ?? 100, range: 70...200,
+                       icons: ("textformat.size.smaller", "textformat.size.larger")) { set("font_scale", $0) }
+            PrefSlider(title: "下一句大小", value: client.prefs["next_size"] ?? 60, range: 50...100,
+                       icons: ("textformat.size.smaller", "textformat.size.larger")) { set("next_size", $0) }
+            Caption("下一句大小是跟目前一句比：100% = 兩句一樣大，離得遠也看得到。")
+            Divider()
+            Toggle("換行動畫", isOn: toggle("line_anim"))
+            Toggle("換歌時背景淡入", isOn: toggle("bg_fade"))
+        }
+    }
+
+    private var backgroundSection: some View {
+        PrefSection(title: "背景") {
+            Picker("背景", selection: pref("bg_mode")) {
+                Text("封面模糊").tag(0)
+                Text("純色").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            if (client.prefs["bg_mode"] ?? 0) == 0 {
+                PrefSlider(title: "背景暗度", value: client.prefs["bg_dim"] ?? 50, range: 0...100,
+                           icons: ("sun.max", "moon")) { set("bg_dim", $0) }
+                Caption("用正在播放的歌的封面做模糊背景，文字是白色。背景會按封面亮度自動加暗；看不清楚可以拉深一點。")
             } else {
-                Picker("亮度", selection: pref("brightness")) {
-                    ForEach([100, 70, 40, 15], id: \.self) { Text("\($0)%").tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Toggle("翻轉畫面（USB 線換邊時用）", isOn: toggle("flipped"))
-                Picker("播放畫面", selection: pref("now_style")) {
-                    Text("歌詞為主").tag(0)
-                    Text("封面在旁").tag(1)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Picker("下一句大小", selection: pref("next_size")) {
-                    Text("較小").tag(0)
-                    Text("中等").tag(1)
-                    Text("一樣大").tag(2)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Toggle("換行動畫", isOn: toggle("line_anim"))
-                Toggle("換歌時背景淡入", isOn: toggle("bg_fade"))
-                Caption("這些設定存在顯示器上，在顯示器的設定頁也可以改，兩邊會同步。")
+                Caption("背景和文字顏色跟 LyricsX「桌面歌詞」的設定一樣：文字、進度（卡拉OK 已唱）、背景顏色。")
             }
         }
     }
@@ -341,19 +314,17 @@ private struct ScreenPage: View {
         }
     }
 
+    private func set(_ key: String, _ value: Int) {
+        ESP32Bridge.shared.setScreenPref(key, value, forClient: client.id)
+    }
+
     /// 屏幕回报的设定值；改了就发给屏幕（它回报后画面才更新）
     private func pref(_ key: String) -> Binding<Int> {
-        Binding(
-            get: { client.prefs[key] ?? 0 },
-            set: { ESP32Bridge.shared.setScreenPref(key, $0, forClient: client.id) }
-        )
+        Binding(get: { client.prefs[key] ?? 0 }, set: { set(key, $0) })
     }
 
     private func toggle(_ key: String) -> Binding<Bool> {
-        Binding(
-            get: { (client.prefs[key] ?? 0) != 0 },
-            set: { ESP32Bridge.shared.setScreenPref(key, $0 ? 1 : 0, forClient: client.id) }
-        )
+        Binding(get: { (client.prefs[key] ?? 0) != 0 }, set: { set(key, $0 ? 1 : 0) })
     }
 
     private var wifiSection: some View {
@@ -532,40 +503,84 @@ private struct LabeledRow: View {
     }
 }
 
-/// 字体大小：小 A —— 大 A，右边显示百分比
-/// 背景暗度：放开滑杆才套用（每次都要重做背景图）
-private struct DimSlider: View {
-    @Binding var value: Double
-    let commit: () -> Void
+/// 设定滑杆（%）：拖的时候只改数字，放开才发给屏幕（背景暗度每次都要重做背景图，不要一直发）
+private struct PrefSlider: View {
+    let title: String
+    let value: Int // 屏幕回报的
+    let range: ClosedRange<Double>
+    var icons: (String, String)?
+    let commit: (Int) -> Void
+    @State private var dragging: Double?
 
     var body: some View {
         HStack(spacing: 8) {
-            Text("背景暗度")
-            Image(systemName: "sun.max").foregroundColor(.secondary)
-            Slider(value: $value, in: 0...1, step: 0.05) { editing in
-                if !editing { commit() }
+            Text(title).frame(width: 72, alignment: .leading)
+            if let icons { Image(systemName: icons.0).foregroundColor(.secondary) }
+            Slider(value: Binding(get: { dragging ?? Double(value) }, set: { dragging = $0 }), in: range, step: 5) { editing in
+                if !editing, let v = dragging { commit(Int(v.rounded())) }
             }
-            Image(systemName: "moon").foregroundColor(.secondary)
-            Text("\(Int((value * 100).rounded()))%")
+            if let icons { Image(systemName: icons.1).foregroundColor(.secondary) }
+            Text("\(Int((dragging ?? Double(value)).rounded()))%")
                 .monospacedDigit()
                 .frame(width: 44, alignment: .trailing)
+        }
+        .onChange(of: value) { _ in dragging = nil } // 屏幕回报新的值了
+    }
+}
+
+/// 播放画面：两种版面的线稿，点一下选
+private struct LayoutPicker: View {
+    let selection: Int
+    let aspect: CGFloat // 屏幕宽 / 高
+    let choose: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ForEach(0..<2, id: \.self) { style in
+                Button { choose(style) } label: {
+                    VStack(spacing: 6) {
+                        LayoutWireframe(coverBeside: style == 1)
+                            .frame(width: 170, height: 170 / aspect)
+                            .overlay(RoundedRectangle(cornerRadius: 6)
+                                .stroke(selection == style ? Color.accentColor : Color.secondary.opacity(0.3),
+                                        lineWidth: selection == style ? 2.5 : 1))
+                        Text(style == 0 ? "歌詞為主" : "封面在旁")
+                            .font(.caption)
+                            .foregroundColor(selection == style ? .primary : .secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 }
 
-private struct ScaleSlider: View {
-    let title: String
-    @Binding var value: Double
+/// 版面线稿：封面、歌名、两行歌词（白的是目前一句）、下方 Bottom Bar
+private struct LayoutWireframe: View {
+    let coverBeside: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(title)
-            Image(systemName: "textformat.size.smaller").foregroundColor(.secondary)
-            Slider(value: $value, in: ESP32Bridge.screenScaleRange, step: 0.05)
-            Image(systemName: "textformat.size.larger").foregroundColor(.secondary)
-            Text("\(Int((value * 100).rounded()))%")
-                .monospacedDigit()
-                .frame(width: 44, alignment: .trailing)
+        GeometryReader { g in
+            let w = g.size.width, h = g.size.height
+            let gray = Color.white.opacity(0.3)
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 6).fill(Color(white: 0.12))
+                if coverBeside {
+                    let side = h * 0.5, lyricsX = w * 0.06 + side + w * 0.05, lyricsW = w - lyricsX - w * 0.05
+                    RoundedRectangle(cornerRadius: 3).fill(gray).frame(width: side, height: side).offset(x: w * 0.06, y: h * 0.12)
+                    Capsule().fill(gray).frame(width: side * 0.7, height: h * 0.05).offset(x: w * 0.06, y: h * 0.67)
+                    Capsule().fill(Color.white.opacity(0.9)).frame(width: lyricsW * 0.8, height: h * 0.1)
+                        .offset(x: lyricsX + lyricsW * 0.1, y: h * 0.28)
+                    Capsule().fill(gray).frame(width: lyricsW * 0.55, height: h * 0.07)
+                        .offset(x: lyricsX + lyricsW * 0.225, y: h * 0.46)
+                } else {
+                    RoundedRectangle(cornerRadius: 2).fill(gray).frame(width: h * 0.15, height: h * 0.15).offset(x: w * 0.04, y: h * 0.07)
+                    Capsule().fill(gray).frame(width: w * 0.2, height: h * 0.05).offset(x: w * 0.04 + h * 0.2, y: h * 0.12)
+                    Capsule().fill(Color.white.opacity(0.9)).frame(width: w * 0.6, height: h * 0.11).offset(x: w * 0.2, y: h * 0.36)
+                    Capsule().fill(gray).frame(width: w * 0.4, height: h * 0.07).offset(x: w * 0.3, y: h * 0.56)
+                }
+                Capsule().fill(gray).frame(width: w * 0.9, height: max(h * 0.025, 1.5)).offset(x: w * 0.05, y: h * 0.86)
+            }
         }
     }
 }

@@ -142,23 +142,12 @@ public enum BridgeMessage {
         public var text: String
         public var highlight: String
         public var background: String
-        public var scale: Double
-        /// 个别屏幕的字体比例（deviceId → 比例），没有的用 scale
-        public var scales: [String: Double]?
-        /// 背景："artwork"（模糊封面，文字白色）或 "solid"（纯色，颜色跟桌面歌词一样）
-        public var backgroundMode: String
-        /// 模糊封面的暗度 0–100（%，屏幕设定页显示用，加暗在 Mac 做）
-        public var backgroundDim: Int
+        // 字体大小、背景模式、暗度是每块屏幕自己的设定（settings / set），不在这里
 
-        public init(text: String, highlight: String, background: String, scale: Double, scales: [String: Double] = [:],
-                    backgroundMode: String, backgroundDim: Int) {
+        public init(text: String, highlight: String, background: String) {
             self.text = text
             self.highlight = highlight
             self.background = background
-            self.scale = BridgeMessage.round(scale)
-            self.scales = scales.isEmpty ? nil : scales.mapValues(BridgeMessage.round)
-            self.backgroundMode = backgroundMode
-            self.backgroundDim = backgroundDim
         }
     }
 
