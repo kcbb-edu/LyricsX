@@ -68,7 +68,7 @@ final class ESP32Bridge: @unchecked Sendable {
         get {
             if let value = UserDefaults.standard.object(forKey: Self.backgroundDarknessKey) as? Double { return value }
             let old = UserDefaults.standard.object(forKey: Self.backgroundDimKey) as? Int ?? 1
-            return [0.2, 0.5, 0.75][min(max(old, 0), 2)]
+            return [0.2, 0.5, 0.65][min(max(old, 0), 2)]
         }
         set {
             UserDefaults.standard.set(newValue, forKey: Self.backgroundDarknessKey)

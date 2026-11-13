@@ -59,12 +59,11 @@ public enum BridgeArtwork {
 
     private static let context = CIContext(options: [.cacheIntermediates: false])
 
-    /// 背景暗度 0（淡）– 1（深）→ 平均亮度、最亮处亮度的上限（线性），在两端之间按比例（对数）取。
-    /// 白字在最亮处也要看得清楚；0.5 ≈ 平均 0.09、最亮 0.22
+    /// 背景暗度 0（淡）– 1（全黑）→ 平均亮度、最亮处亮度的上限（线性）。白字在最亮处也要看得清楚。
+    /// 0.5 ≈ 平均 0.09、最亮 0.22；0.75 ≈ 平均 0.03、最亮 0.08；1 = 黑色
     static func dimLimits(_ dim: Double) -> (average: Double, brightest: Double) {
-        let d = min(max(dim, 0), 1)
-        func mix(_ light: Double, _ dark: Double) -> Double { light * pow(dark / light, d) }
-        return (mix(0.25, 0.03), mix(0.60, 0.08))
+        let f = pow(1 - min(max(dim, 0), 1), 1.5)
+        return (0.25 * f, 0.60 * f)
     }
 
     /// 封面（coverSize²）和屏幕大小的背景（withBackground = false 时不做），都是 JPEG
