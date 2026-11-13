@@ -50,6 +50,22 @@ public enum BridgeMessage {
         }
     }
 
+    /// 封面（只发给某一块屏幕：背景按那块屏幕的大小做）。JPEG，base64
+    public struct Art: Encodable, Sendable {
+        public let type = "art"
+        public var id: String
+        /// 320×320 封面
+        public var cover: String
+        /// 屏幕大小、已模糊加暗的背景（纯色背景模式不发）
+        public var background: String?
+
+        public init(id: String, cover: Data, background: Data?) {
+            self.id = id
+            self.cover = cover.base64EncodedString()
+            self.background = background?.base64EncodedString()
+        }
+    }
+
     public struct Lyrics: Encodable, Sendable {
         public enum Status: String, Encodable, Sendable {
             /// 有歌词
@@ -129,13 +145,20 @@ public enum BridgeMessage {
         public var scale: Double
         /// 个别屏幕的字体比例（deviceId → 比例），没有的用 scale
         public var scales: [String: Double]?
+        /// 背景："artwork"（模糊封面，文字白色）或 "solid"（纯色，颜色跟桌面歌词一样）
+        public var backgroundMode: String
+        /// 模糊封面的暗度 0–100（%，屏幕设定页显示用，加暗在 Mac 做）
+        public var backgroundDim: Int
 
-        public init(text: String, highlight: String, background: String, scale: Double, scales: [String: Double] = [:]) {
+        public init(text: String, highlight: String, background: String, scale: Double, scales: [String: Double] = [:],
+                    backgroundMode: String, backgroundDim: Int) {
             self.text = text
             self.highlight = highlight
             self.background = background
             self.scale = BridgeMessage.round(scale)
             self.scales = scales.isEmpty ? nil : scales.mapValues(BridgeMessage.round)
+            self.backgroundMode = backgroundMode
+            self.backgroundDim = backgroundDim
         }
     }
 

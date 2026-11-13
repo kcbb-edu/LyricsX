@@ -44,6 +44,44 @@ final class ESP32Bridge: @unchecked Sendable {
         }
     }
 
+    static let backgroundModeKey = "LyricsXBridgeBackgroundMode"
+    static let backgroundDimKey = "LyricsXBridgeBackgroundDim" // 以前的三档（0 淡 / 1 标准 / 2 深）
+    static let backgroundDarknessKey = "LyricsXBridgeBackgroundDarkness"
+
+    enum BackgroundMode: String, CaseIterable {
+        /// 模糊封面（文字白色）
+        case artwork
+        /// 纯色（颜色跟桌面歌词一样；Mac 不用做模糊背景）
+        case solid
+    }
+
+    var backgroundMode: BackgroundMode {
+        get { BackgroundMode(rawValue: UserDefaults.standard.string(forKey: Self.backgroundModeKey) ?? "") ?? .artwork }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: Self.backgroundModeKey)
+            queue.async { self.backgroundChanged() }
+        }
+    }
+
+    /// 模糊封面的暗度 0（淡）– 1（深）
+    var backgroundDim: Double {
+        get {
+            if let value = UserDefaults.standard.object(forKey: Self.backgroundDarknessKey) as? Double { return value }
+            let old = UserDefaults.standard.object(forKey: Self.backgroundDimKey) as? Int ?? 1
+            return [0.2, 0.5, 0.75][min(max(old, 0), 2)]
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Self.backgroundDarknessKey)
+            queue.async { self.backgroundChanged() }
+        }
+    }
+
+    /// 背景设定改了：样式重发（屏幕按模式换颜色），封面重做
+    private func backgroundChanged() {
+        sendStyle()
+        if artwork != nil, let id = trackID { server.setArt(trackID: id) }
+    }
+
     /// 个别屏幕自订的字体比例（deviceId → 比例）
     private var screenScales: [String: Double] {
         UserDefaults.standard.dictionary(forKey: Self.screenScalesKey) as? [String: Double] ?? [:]
@@ -79,6 +117,9 @@ final class ESP32Bridge: @unchecked Sendable {
     /// 播放器最新的状态、LyricsX 目前的行号（从事件拿到的新值）
     private var playback = PlaybackState.stopped
     private var lineIndex: Int?
+    /// 目前这首歌的封面（播放器给的，或 iTunes 查到的）
+    private var artwork: CGImage?
+    private var artworkTask: Task<Void, Never>?
 
     private init() {}
 
@@ -86,6 +127,9 @@ final class ESP32Bridge: @unchecked Sendable {
         guard cancelBag.isEmpty else { return }
         server.onStatusChange = { [status] newValue in
             DispatchQueue.main.async { status.server = newValue }
+        }
+        server.onNeedArt = { [weak self] width, height in
+            self?.queue.async { self?.renderArt(width: width, height: height) }
         }
         if isServerEnabled { server.start() }
 
@@ -165,7 +209,9 @@ final class ESP32Bridge: @unchecked Sendable {
             highlight: hex(progress ?? NSColor(red: 0.2, green: 1, blue: 0.87, alpha: 1)),
             background: hex(background ?? .black),
             scale: screenScale,
-            scales: screenScales
+            scales: screenScales,
+            backgroundMode: backgroundMode.rawValue,
+            backgroundDim: Int((backgroundDim * 100).rounded())
         ))
     }
 
@@ -182,8 +228,11 @@ final class ESP32Bridge: @unchecked Sendable {
 
     private func trackChanged(_ track: MusicTrack?) {
         resolveTask?.cancel()
+        artworkTask?.cancel()
         pendingStop?.cancel()
         pendingStop = nil
+        artwork = nil
+        server.setArt(trackID: nil)
         guard let track else {
             trackID = nil
             lineIndexMap = [:]
@@ -216,7 +265,40 @@ final class ESP32Bridge: @unchecked Sendable {
                 self.sendTrack(track, resolved: resolved)
             }
         }
+        loadArtwork(track, title: title, artist: artist, duration: duration)
         sendSync()
+    }
+
+    // MARK: - 封面
+
+    /// 先用播放器给的封面；没有（Apple Music 串流常常没有）就去 iTunes 查
+    private func loadArtwork(_ track: MusicTrack, title: String, artist: String, duration: TimeInterval) {
+        if let image = track.artwork?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            artwork = image
+            server.setArt(trackID: track.id)
+            return
+        }
+        let storefront = TrackNameResolver.shared.storefront
+        artworkTask = Task { [weak self] in
+            let image = await BridgeArtwork.lookup(title: title, artist: artist, duration: duration, storefront: storefront)
+            guard let image, !Task.isCancelled else { return }
+            self?.queue.async {
+                guard let self, self.trackID == track.id else { return }
+                self.artwork = image
+                self.server.setArt(trackID: track.id)
+            }
+        }
+    }
+
+    /// 做某个屏幕大小的封面和背景（在背景执行绪做，做好直接交给 server）
+    private func renderArt(width: Int, height: Int) {
+        guard let image = artwork, let id = trackID else { return }
+        let dim = backgroundDim, withBackground = backgroundMode == .artwork
+        DispatchQueue.global(qos: .utility).async { [server] in
+            guard let art = BridgeArtwork.render(image, width: width, height: height, dim: dim,
+                                                 withBackground: withBackground) else { return }
+            server.send(BridgeMessage.Art(id: id, cover: art.cover, background: art.background), width: width, height: height)
+        }
     }
 
     private func updateNameStatus(_ value: ESP32BridgeStatus.NameStatus?) {

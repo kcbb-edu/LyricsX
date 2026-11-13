@@ -95,6 +95,8 @@ private struct GeneralPage: View {
     @ObservedObject var status: ESP32BridgeStatus
     @State private var serverEnabled = ESP32Bridge.shared.isServerEnabled
     @State private var screenScale = ESP32Bridge.shared.screenScale
+    @State private var backgroundMode = ESP32Bridge.shared.backgroundMode
+    @State private var backgroundDim = ESP32Bridge.shared.backgroundDim
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -108,11 +110,27 @@ private struct GeneralPage: View {
                 serverStatusRow
             }
             PrefSection(title: "顯示") {
+                Picker("背景", selection: Binding(
+                    get: { backgroundMode },
+                    set: { backgroundMode = $0; ESP32Bridge.shared.backgroundMode = $0 }
+                )) {
+                    Text("封面模糊").tag(ESP32Bridge.BackgroundMode.artwork)
+                    Text("純色").tag(ESP32Bridge.BackgroundMode.solid)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                if backgroundMode == .artwork {
+                    DimSlider(value: $backgroundDim) { ESP32Bridge.shared.backgroundDim = backgroundDim }
+                    Caption("用正在播放的歌的封面做模糊背景，文字是白色。背景會按封面亮度自動加暗，歌詞位置最亮的地方也看得清楚；看不清楚可以拉深一點。")
+                } else {
+                    Caption("背景和文字顏色跟 LyricsX「桌面歌詞」的設定一樣：文字、進度（卡拉OK 已唱）、背景顏色。Mac 不用製作模糊背景，只傳封面小圖。")
+                }
+                Divider()
                 ScaleSlider(title: "字體大小", value: Binding(
                     get: { screenScale },
                     set: { screenScale = $0; ESP32Bridge.shared.screenScale = $0 }
                 ))
-                Caption("所有顯示器共用；個別顯示器可以在左邊選它另外設定。顏色跟「桌面歌詞」的文字、進度、背景顏色一樣。亮度和旋轉在顯示器上調整。")
+                Caption("所有顯示器共用；個別顯示器可以在左邊選它另外設定。亮度、翻轉和時鐘樣式在顯示器上調整。")
             }
         }
     }
@@ -417,6 +435,26 @@ private struct LabeledRow: View {
 }
 
 /// 字体大小：小 A —— 大 A，右边显示百分比
+/// 背景暗度：放开滑杆才套用（每次都要重做背景图）
+private struct DimSlider: View {
+    @Binding var value: Double
+    let commit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("背景暗度")
+            Image(systemName: "sun.max").foregroundColor(.secondary)
+            Slider(value: $value, in: 0...1, step: 0.05) { editing in
+                if !editing { commit() }
+            }
+            Image(systemName: "moon").foregroundColor(.secondary)
+            Text("\(Int((value * 100).rounded()))%")
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+        }
+    }
+}
+
 private struct ScaleSlider: View {
     let title: String
     @Binding var value: Double

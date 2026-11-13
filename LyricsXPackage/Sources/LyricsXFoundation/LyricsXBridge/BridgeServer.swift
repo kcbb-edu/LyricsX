@@ -143,10 +143,46 @@ public final class BridgeServer: @unchecked Sendable {
         queue.async {
             guard let data = self.encode(message),
                   let key = self.clients.first(where: { $0.value.id == clientID })?.key else { return }
-            if let connection = self.connections[key] {
-                self.send(data, to: connection)
-            } else {
-                self.usbPorts.values.first { ObjectIdentifier($0) == key }?.send(data)
+            self.send(data, toKey: key)
+        }
+    }
+
+    private func send(_ data: Data, toKey key: ObjectIdentifier) {
+        if let connection = connections[key] {
+            send(data, to: connection)
+        } else {
+            usbPorts.values.first { ObjectIdentifier($0) == key }?.send(data)
+        }
+    }
+
+    // MARK: - 封面（每种屏幕大小一份）
+
+    /// 需要某个大小的封面时呼叫（在 server queue 上）：做好后用 send(_:width:height:) 发
+    public var onNeedArt: (@Sendable (_ width: Int, _ height: Int) -> Void)?
+    /// 有封面的歌（nil = 没有封面）、已经做好的封面（"宽x高" → 讯息）
+    private var artTrackID: String?
+    private var latestArt: [String: Data] = [:]
+
+    /// 换歌：这首歌有没有封面。有的话，向每种已连接的屏幕大小要一份
+    public func setArt(trackID: String?) {
+        queue.async {
+            self.artTrackID = trackID
+            self.latestArt = [:]
+            guard trackID != nil else { return }
+            var sizes = Set<[Int]>()
+            for client in self.clients.values {
+                if let w = client.width, let h = client.height, sizes.insert([w, h]).inserted { self.onNeedArt?(w, h) }
+            }
+        }
+    }
+
+    public func send(_ message: BridgeMessage.Art, width: Int, height: Int) {
+        queue.async {
+            guard message.id == self.artTrackID, let data = self.encode(message) else { return }
+            bridgeTrace("SEND art \(width)x\(height) \(data.count / 1024) KB")
+            self.latestArt["\(width)x\(height)"] = data
+            for (key, client) in self.clients where client.width == width && client.height == height {
+                self.send(data, toKey: key)
             }
         }
     }
@@ -345,6 +381,10 @@ public final class BridgeServer: @unchecked Sendable {
                 publishStatus()
             }
             log("装置 \(message.device ?? "?")（\(message.deviceId ?? "?")）\(message.width ?? 0)×\(message.height ?? 0)")
+            // 知道屏幕大小了：补发封面，没有这个大小的就去做
+            if artTrackID != nil, let w = message.width, let h = message.height {
+                if let art = latestArt["\(w)x\(h)"] { reply(art) } else { onNeedArt?(w, h) }
+            }
         case "wifi_list":
             if var client = clients[key] {
                 client.wifiSaved = message.saved ?? []
