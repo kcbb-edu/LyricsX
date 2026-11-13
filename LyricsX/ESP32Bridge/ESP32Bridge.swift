@@ -224,6 +224,11 @@ final class ESP32Bridge: @unchecked Sendable {
         server.send(BridgeMessage.WiFi(action: .remove, ssid: ssid), toClient: clientID)
     }
 
+    /// 改某块屏幕的本机设定（设定存在屏幕上，改完它会回报，偏好设置跟着更新）
+    func setScreenPref(_ key: String, _ value: Int, forClient clientID: String) {
+        server.send(BridgeMessage.SetPref(key: key, value: value), toClient: clientID)
+    }
+
     // MARK: - Track
 
     private func trackChanged(_ track: MusicTrack?) {

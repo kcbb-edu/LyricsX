@@ -177,6 +177,18 @@ public enum BridgeMessage {
         }
     }
 
+    /// 改屏幕的一项本机设定（protocol.md `set`）。屏幕套用、存起来，再回报 `settings`
+    public struct SetPref: Encodable, Sendable {
+        public let type = "set"
+        public var key: String
+        public var value: Int
+
+        public init(key: String, value: Int) {
+            self.key = key
+            self.value = value
+        }
+    }
+
     public struct Stopped: Encodable, Sendable {
         public let type = "stopped"
         public init() {}
@@ -198,6 +210,8 @@ public enum BridgeMessage {
         var current: String?
         var saved: [String]?
         var test: WiFiTest?
+        // settings：屏幕的本机设定（亮度、播放画面…）
+        var values: [String: Int]?
     }
 
     /// 刚加入的 Wi-Fi 的试连结果（wifi_list 的 test）

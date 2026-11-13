@@ -45,6 +45,8 @@ public final class BridgeServer: @unchecked Sendable {
         /// 刚加入的 Wi-Fi 试连结果（还没连上任何 Wi-Fi 时屏幕会马上试）：result 是 testing / ok / wrong_password / not_found / failed
         public var wifiTestSSID: String?
         public var wifiTestResult: String?
+        /// 屏幕的本机设定（protocol.md `settings`）；旧固件没有就是空的
+        public var prefs: [String: Int] = [:]
     }
 
     /// 状态改变时呼叫（在 server queue 上），请在 start() 之前设定
@@ -142,7 +144,7 @@ public final class BridgeServer: @unchecked Sendable {
     }
 
     /// 只发给某一块屏幕（Client.id）
-    public func send(_ message: BridgeMessage.WiFi, toClient clientID: String) {
+    public func send(_ message: some Encodable & Sendable, toClient clientID: String) {
         queue.async {
             guard let data = self.encode(message),
                   let key = self.clients.first(where: { $0.value.id == clientID })?.key else { return }
@@ -370,6 +372,7 @@ public final class BridgeServer: @unchecked Sendable {
     }
 
     private func handle(_ message: BridgeMessage.Incoming, key: ObjectIdentifier, reply: (Data) -> Void) {
+        if message.type != "ping" { bridgeTrace("RECV \(message.type)\(message.values.map { " \($0.count) 项" } ?? "")") }
         switch message.type {
         case "ping":
             if let data = encode(BridgeMessage.Pong()) { reply(data) }
@@ -387,6 +390,12 @@ public final class BridgeServer: @unchecked Sendable {
             // 知道屏幕大小了：补发封面，没有这个大小的就去做
             if artTrackID != nil, let w = message.width, let h = message.height {
                 if let art = latestArt["\(w)x\(h)"] { reply(art) } else { onNeedArt?(w, h) }
+            }
+        case "settings":
+            if var client = clients[key], let values = message.values {
+                client.prefs = values
+                clients[key] = client
+                publishStatus()
             }
         case "wifi_list":
             if var client = clients[key] {
@@ -454,21 +463,25 @@ public final class BridgeServer: @unchecked Sendable {
         let key = ObjectIdentifier(port)
         if message.type == "hello", !port.isHelloPending {
             // 屏幕刚开机 / 刚连上：补发全部状态。没人读串口时屏幕每 2 秒发的 hello 会积在缓冲里、
-            // 打开时一次涌进来，所以等一下、只回一次
+            // 打开时一次涌进来，所以等一下、只回一次。
+            // 屏幕回 hello 后马上送 wifi_list、settings：等的这段时间也要收下，所以 Client 现在就建立
             port.isHelloPending = true
+            if clients[key] == nil {
+                log("USB 屏幕已连接：\(port.path)")
+                clients[key] = Client(id: "usb:\(port.path)", address: "USB")
+            }
             queue.asyncAfter(deadline: .now() + 0.3) { [weak self, weak port] in
                 guard let self, let port, self.usbPorts[port.path] === port else { return }
                 port.isHelloPending = false
                 port.isGreeted = true
-                if self.clients[key] == nil { self.log("USB 屏幕已连接：\(port.path)") }
-                self.clients[key] = Client(id: "usb:\(port.path)", address: "USB")
                 self.publishStatus()
                 self.sendInitialState(port.send)
                 self.handle(message, key: key, reply: port.send) // 记下装置资料
             }
             return
         }
-        guard port.isGreeted else { return }
+        // 还没打过招呼时只收状态（wifi_list、settings），其他的（hello 重复、ping）不理
+        guard port.isGreeted || message.type == "wifi_list" || message.type == "settings" else { return }
         handle(message, key: key, reply: port.send)
     }
 

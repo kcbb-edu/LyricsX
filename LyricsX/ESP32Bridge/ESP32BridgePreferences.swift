@@ -130,7 +130,7 @@ private struct GeneralPage: View {
                     get: { screenScale },
                     set: { screenScale = $0; ESP32Bridge.shared.screenScale = $0 }
                 ))
-                Caption("所有顯示器共用；個別顯示器可以在左邊選它另外設定。亮度、翻轉和時鐘樣式在顯示器上調整。")
+                Caption("所有顯示器共用；個別顯示器可以在左邊選它另外設定。亮度、播放畫面、待機時鐘等也在左邊選顯示器調整。")
             }
         }
     }
@@ -217,7 +217,8 @@ private struct ScreenInfo {
     var only24GHz: Bool { client.device == "guition-p4-4.3" }
 }
 
-/// 跟屏幕上的设定页同样分类：顯示 / 連線 / Wi-Fi / 關於（亮度、旋转在屏幕上调）
+/// 跟屏幕上的设定页同样分类：顯示 / 連線 / Wi-Fi / 關於。
+/// 屏幕的本机设定（亮度、播放画面、待机…）存在屏幕上：这里显示它回报的值，改了就发 `set`，它套用后再回报
 private struct ScreenPage: View {
     let client: BridgeServer.Client
     @State private var isAdding = false
@@ -235,6 +236,7 @@ private struct ScreenPage: View {
         VStack(alignment: .leading, spacing: 20) {
             PageTitle(info.name)
             if let deviceID = client.deviceId { displaySection(deviceID) }
+            if !client.prefs.isEmpty { pauseSection }
             PrefSection(title: "連線") {
                 LabeledRow("連線方式", info.isUSB ? "USB" : "Wi-Fi")
                 if !info.isUSB { LabeledRow("IP 位址", client.address) }
@@ -285,11 +287,81 @@ private struct ScreenPage: View {
             } else {
                 Caption("跟「一般」相同：\(Int((ESP32Bridge.shared.screenScale * 100).rounded()))%")
             }
+            Divider()
+            if client.prefs.isEmpty {
+                Caption("更新這塊顯示器的韌體後，可以在這裡調整亮度、播放畫面等設定。")
+            } else {
+                Picker("亮度", selection: pref("brightness")) {
+                    ForEach([100, 70, 40, 15], id: \.self) { Text("\($0)%").tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                Toggle("翻轉畫面（USB 線換邊時用）", isOn: toggle("flipped"))
+                Picker("播放畫面", selection: pref("now_style")) {
+                    Text("歌詞為主").tag(0)
+                    Text("封面在旁").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                Picker("下一句大小", selection: pref("next_size")) {
+                    Text("較小").tag(0)
+                    Text("中等").tag(1)
+                    Text("一樣大").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+                Toggle("換行動畫", isOn: toggle("line_anim"))
+                Toggle("換歌時背景淡入", isOn: toggle("bg_fade"))
+                Caption("這些設定存在顯示器上，在顯示器的設定頁也可以改，兩邊會同步。")
+            }
         }
+    }
+
+    private var pauseSection: some View {
+        PrefSection(title: "暫停後") {
+            Picker("顯示封面與時間", selection: pref("card_sec")) {
+                Text("30 秒").tag(30)
+                Text("1 分鐘").tag(60)
+                Text("5 分鐘").tag(300)
+                Text("永不").tag(0)
+            }
+            .fixedSize()
+            Picker("顯示待機時鐘", selection: pref("standby_min")) {
+                ForEach([1, 5, 10, 30], id: \.self) { Text("\($0) 分鐘").tag($0) }
+                Text("永不").tag(0)
+            }
+            .fixedSize()
+            Picker("待機時鐘樣式", selection: pref("clock_face")) {
+                Text("數字").tag(0)
+                Text("大字").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            Caption("暫停後先顯示封面與時間，再變成待機時鐘。Mac 沒開或沒連線時，顯示器也會當時鐘用。")
+        }
+    }
+
+    /// 屏幕回报的设定值；改了就发给屏幕（它回报后画面才更新）
+    private func pref(_ key: String) -> Binding<Int> {
+        Binding(
+            get: { client.prefs[key] ?? 0 },
+            set: { ESP32Bridge.shared.setScreenPref(key, $0, forClient: client.id) }
+        )
+    }
+
+    private func toggle(_ key: String) -> Binding<Bool> {
+        Binding(
+            get: { (client.prefs[key] ?? 0) != 0 },
+            set: { ESP32Bridge.shared.setScreenPref(key, $0 ? 1 : 0, forClient: client.id) }
+        )
     }
 
     private var wifiSection: some View {
         PrefSection(title: "Wi-Fi") {
+            if !client.prefs.isEmpty {
+                Toggle("自動連線 Wi-Fi（關閉後只用 USB 連線）", isOn: toggle("wifi_auto"))
+                Divider()
+            }
             if client.wifiSaved.isEmpty {
                 Caption("尚未儲存任何 Wi-Fi")
             }
